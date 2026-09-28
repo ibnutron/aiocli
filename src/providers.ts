@@ -231,7 +231,11 @@ interface StoredProvider {
 interface ProvidersFile {
   providers: Record<string, StoredProvider>;
   active?: { provider: string; model?: string };
+  /** Last models picked, newest first (the model picker's "Recent" group). */
+  recent?: { provider: string; model: string }[];
 }
+
+const MAX_RECENT = 5;
 
 const CONFIG_DIR = join(homedir(), '.aiolah');
 const PROVIDERS_FILE = join(CONFIG_DIR, 'providers.json');
@@ -239,7 +243,7 @@ const PROVIDERS_FILE = join(CONFIG_DIR, 'providers.json');
 function readFile(): ProvidersFile {
   try {
     const data = JSON.parse(readFileSync(PROVIDERS_FILE, 'utf8')) as ProvidersFile;
-    return { providers: data.providers ?? {}, active: data.active };
+    return { providers: data.providers ?? {}, active: data.active, recent: data.recent };
   } catch {
     return { providers: {} };
   }
@@ -306,7 +310,18 @@ export function activeSelection(): { provider: string; model?: string } | undefi
 export function setActiveSelection(provider: string, model?: string): void {
   const data = readFile();
   data.active = { provider, ...(model ? { model } : {}) };
+  if (model) {
+    data.recent = [
+      { provider, model },
+      ...(data.recent ?? []).filter((item) => item.provider !== provider || item.model !== model),
+    ].slice(0, MAX_RECENT);
+  }
   writeFile(data);
+}
+
+/** Recently picked provider/model pairs, newest first. */
+export function recentSelections(): { provider: string; model: string }[] {
+  return readFile().recent ?? [];
 }
 
 /** `--provider`, else the saved choice, else Anthropic when ANTHROPIC_API_KEY is set, else aiolah. */
@@ -343,7 +358,7 @@ export async function resolveProviderModel(provider: string, explicit?: string):
     return def.defaultModel;
   }
   throw new Error(
-    `Choose a model for ${def.name}: run \`aiolah models --provider ${provider}\`, then pass --model <id> (or use /model in chat).`,
+    `Choose a model for ${def.name}: run \`aiolah models --provider ${provider}\`, then pass --model <id> (or use /models in chat).`,
   );
 }
 

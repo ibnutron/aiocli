@@ -1,6 +1,6 @@
 import type { Interface } from 'node:readline/promises';
 import { stdout } from 'node:process';
-import { ask } from './prompt.js';
+import { ask, pick as pickFromList } from './prompt.js';
 import { matchSlashCommands, type SlashCommand } from './slash.js';
 import {
   COLOR,
@@ -44,6 +44,41 @@ export interface TerminalInputHandlers {
 }
 
 export type ConfirmAnswer = 'yes' | 'always' | 'no';
+
+export interface PickItem {
+  label: string;
+  /** Dimmed text after the label (e.g. the provider). */
+  detail?: string;
+  /** Right-aligned hint (e.g. "Free"). */
+  hint?: string;
+  value: string;
+  /** Marked with ● (the current choice). */
+  current?: boolean;
+  /** Shown but not selectable (e.g. "Could not load models"). */
+  disabled?: boolean;
+}
+
+export interface PickSection {
+  title?: string;
+  items: PickItem[];
+}
+
+export interface PickOptions {
+  title: string;
+  sections: PickSection[];
+  /** Ctrl+<key> shortcuts shown at the bottom; picking one resolves to its value. */
+  actions?: { key: string; label: string; value: string }[];
+}
+
+type PickRow = { header: string } | { item: PickItem };
+
+interface PickState {
+  options: PickOptions;
+  query: string;
+  /** Index into the selectable items of the filtered rows. */
+  selected: number;
+  resolve: (value: string | null) => void;
+}
 
 const MAX_MENU_ITEMS = 8;
 
@@ -91,6 +126,7 @@ export class TerminalInput {
     resolve: (answer: ConfirmAnswer) => void;
     shownAt: number;
   } | null = null;
+  private picking: PickState | null = null;
   private readonly branch: string | null;
 
   constructor(
@@ -176,6 +212,18 @@ export class TerminalInput {
     this.cursorRow = 0;
   }
 
+  /** Clears the screen and scrollback; the box stays at the bottom. */
+  clearScreen(): void {
+    if (!this.enhanced) {
+      stdout.write('\x1b[2J\x1b[3J\x1b[H');
+      return;
+    }
+    this.home = false;
+    stdout.write(`\x1b[2J\x1b[3J\x1b[${stdout.rows || 24};1H`);
+    this.cursorRow = 0;
+    this.refresh();
+  }
+
   /** Redraws the box (after the mode or model changed). */
   refresh(): void {
     if (this.mounted) {
@@ -219,6 +267,151 @@ export class TerminalInput {
     });
   }
 
+  /**
+   * opencode-style dialog inside the box: a title, a search field, grouped
+   * items (↑/↓, Enter; typing filters), Esc to cancel. Resolves to the picked
+   * item's or action's value, or null.
+   */
+  async pick(options: PickOptions): Promise<string | null> {
+    if (!this.enhanced) {
+      const items = options.sections.flatMap((section) =>
+        section.items.filter((item) => !item.disabled).map((item) => ({ ...item, section: section.title })),
+      );
+      const choice = await pickFromList(
+        this.rl,
+        options.title,
+        items.map((item) => `${item.current ? '●' : ' '} ${item.label}${item.detail ? `  ${item.detail}` : ''}`),
+      );
+      return choice === null ? null : items[choice]!.value;
+    }
+    this.mount();
+    return new Promise((resolve) => {
+      const flat = options.sections.flatMap((section) => section.items.filter((item) => !item.disabled));
+      this.picking = { options, query: '', selected: Math.max(0, flat.findIndex((item) => item.current)), resolve };
+      this.render();
+    });
+  }
+
+  private finishPick(value: string | null): void {
+    const state = this.picking!;
+    this.picking = null;
+    this.render();
+    state.resolve(value);
+  }
+
+  private onPickKey(sequence: string | undefined, key: Key): void {
+    const state = this.picking!;
+    const selectable = pickRows(state).filter((row): row is { item: PickItem } => 'item' in row && !row.item.disabled);
+    const page = Math.max(1, this.pickListHeight() - 2);
+    const action = key.ctrl ? state.options.actions?.find((candidate) => candidate.key === key.name) : undefined;
+    if (action) {
+      this.finishPick(action.value);
+      return;
+    }
+    switch (true) {
+      case key.name === 'escape' || (key.ctrl && key.name === 'c'):
+        this.finishPick(null);
+        return;
+      case key.name === 'return' || key.name === 'enter':
+        if (selectable[state.selected]) {
+          this.finishPick(selectable[state.selected]!.item.value);
+        }
+        return;
+      case key.name === 'up':
+        state.selected = (state.selected - 1 + selectable.length) % Math.max(1, selectable.length);
+        break;
+      case key.name === 'down':
+        state.selected = (state.selected + 1) % Math.max(1, selectable.length);
+        break;
+      case key.name === 'pageup':
+        state.selected = Math.max(0, state.selected - page);
+        break;
+      case key.name === 'pagedown':
+        state.selected = Math.min(selectable.length - 1, state.selected + page);
+        break;
+      case key.name === 'backspace':
+        state.query = state.query.slice(0, -1);
+        state.selected = 0;
+        break;
+      default:
+        if (sequence && !key.ctrl && !key.meta && !sequence.startsWith('\x1b') && sequence >= ' ') {
+          state.query += sequence;
+          state.selected = 0;
+          break;
+        }
+        return;
+    }
+    this.render();
+  }
+
+  /** Rows the dialog's list may use on this screen. */
+  private pickListHeight(): number {
+    return Math.max(4, (stdout.rows || 24) - 12);
+  }
+
+  private pickLines(inner: number): { lines: string[]; searchRow: number } {
+    const state = this.picking!;
+    const rows = pickRows(state);
+    const lines: string[] = [];
+    lines.push(panelRow(''));
+    const title = style.bold(style.white(state.options.title));
+    lines.push(panelRow(`${title}${' '.repeat(Math.max(1, inner - visibleLength(title) - 3))}${style.gray('esc')}`));
+    lines.push(panelRow(''));
+    const searchRow = lines.length;
+    lines.push(panelRow(state.query ? style.white(truncate(state.query, inner)) : style.gray('Search')));
+    lines.push(panelRow(''));
+
+    // Keep the selected item in view.
+    let selectableIndex = -1;
+    const rendered = rows.map((row) => {
+      if ('header' in row) {
+        return { text: style.accent(style.bold(truncate(row.header, inner))), selected: false };
+      }
+      const { item } = row;
+      const isSelected = !item.disabled && ++selectableIndex === state.selected;
+      const marker = item.current ? '● ' : '  ';
+      const hint = item.hint ?? '';
+      const room = inner - marker.length - (hint ? hint.length + 2 : 0);
+      const label = truncate(item.label, room);
+      const detail = item.detail ? truncate(item.detail, Math.max(0, room - label.length - 1)) : '';
+      const plain = `${marker}${label}${detail ? ` ${detail}` : ''}`;
+      const gap = ' '.repeat(Math.max(hint ? 2 : 0, inner - plain.length - hint.length));
+      if (isSelected) {
+        const text = `${plain}${gap}${hint}`.padEnd(inner);
+        return { text: COLOR ? `\x1b[48;5;141m\x1b[30m${text}\x1b[39m\x1b[49m` : `>${text.slice(1)}`, selected: true };
+      }
+      const styledLabel = item.disabled ? style.gray(label) : style.white(label);
+      return {
+        text: `${marker}${styledLabel}${detail ? ` ${style.gray(detail)}` : ''}${gap}${style.gray(hint)}`,
+        selected: false,
+      };
+    });
+    if (!rendered.length) {
+      rendered.push({ text: style.gray('No matches'), selected: false });
+    }
+    const height = this.pickListHeight();
+    const selectedAt = Math.max(0, rendered.findIndex((row) => row.selected));
+    const start = Math.min(Math.max(0, selectedAt - Math.floor(height / 2)), Math.max(0, rendered.length - height));
+    for (const row of rendered.slice(start, start + height)) {
+      lines.push(panelRow(row.text));
+    }
+
+    const actions = state.options.actions ?? [];
+    if (actions.length) {
+      lines.push(panelRow(''));
+      lines.push(
+        panelRow(
+          truncateStyled(
+            actions.map((action) => `${style.white(action.label)} ${style.gray(`ctrl+${action.key}`)}`).join('   '),
+            inner,
+          ),
+        ),
+      );
+    }
+    lines.push(panelRow(''));
+    return { lines, searchRow };
+  }
+
   private mount(): void {
     if (!this.mounted) {
       // Bracketed paste: a pasted multi-line text arrives as one message, not one per line.
@@ -249,6 +442,10 @@ export class TerminalInput {
 
     if (this.pendingConfirm) {
       this.onConfirmKey(key, typing);
+      return;
+    }
+    if (this.picking) {
+      this.onPickKey(sequence, key);
       return;
     }
 
@@ -532,9 +729,13 @@ export class TerminalInput {
         : `${margin}  ${style.white(name)}${style.gray(description)}`;
     });
 
-    const box: string[] = [panelRow('')];
+    let box: string[] = [panelRow('')];
     let cursor = { row: 0, col: 0 };
-    if (this.pendingConfirm) {
+    if (this.picking) {
+      const { lines: pickLines, searchRow } = this.pickLines(inner);
+      box = pickLines;
+      cursor = { row: searchRow, col: contentColumn + Math.min(this.picking.query.length, inner) };
+    } else if (this.pendingConfirm) {
       box.push(panelRow(style.yellow('△ Permission required')));
       for (const row of wrapPlain(this.pendingConfirm.description, inner)) {
         box.push(panelRow(style.white(row)));
@@ -565,7 +766,9 @@ export class TerminalInput {
       ? `${scanner(this.frame)}  ${this.activity ? style.gray(truncate(this.activity, 24)) + '  ' : ''}${style.white('esc')} ${style.gray('interrupt')}`
       : this.notice;
     const queued = this.queue.length ? `${style.accent(`${this.queue.length} queued`)}  ` : '';
-    const right = `${queued}${style.white('shift+tab')} ${style.gray('mode')}  ${style.white('/')} ${style.gray('commands')}`;
+    const right = this.picking
+      ? `${style.white('↑↓')} ${style.gray('select')}  ${style.white('enter')} ${style.gray('confirm')}`
+      : `${queued}${style.white('shift+tab')} ${style.gray('mode')}  ${style.white('/')} ${style.gray('commands')}`;
     const room = width - MARGIN * 2 - 1;
     const status =
       visibleLength(left) + visibleLength(right) + 2 <= room
@@ -605,6 +808,29 @@ export class TerminalInput {
     lines.push(...box, statusLine, ...spacer, ...footer);
     return { lines, cursor: { row: boxStart + cursor.row, col: cursor.col } };
   }
+}
+
+/** The dialog's rows after filtering by the search query (every word must match). */
+function pickRows(state: PickState): PickRow[] {
+  const words = state.query.toLowerCase().split(/\s+/).filter(Boolean);
+  const rows: PickRow[] = [];
+  for (const section of state.options.sections) {
+    const items = section.items.filter((item) => {
+      const haystack = `${item.label} ${item.detail ?? ''} ${section.title ?? ''} ${item.value}`.toLowerCase();
+      return words.every((word) => haystack.includes(word));
+    });
+    if (!items.length) {
+      continue;
+    }
+    if (section.title) {
+      if (rows.length) {
+        rows.push({ header: '' });
+      }
+      rows.push({ header: section.title });
+    }
+    rows.push(...items.map((item) => ({ item })));
+  }
+  return rows;
 }
 
 /** Wraps the input buffer to `width` and finds the cursor's row/column in it. */

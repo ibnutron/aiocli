@@ -123,17 +123,27 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
         continue;
       }
       if (line.trim().startsWith('/')) {
-        box.unmount();
-        stdout.write(`${style.gray(`${' '.repeat(CONTENT_INDENT)}${line.trim()}`)}\n`);
-        const result = await handleSlash(line, rl, session);
-        stdout.write('\n');
+        box.print(style.gray(`${' '.repeat(CONTENT_INDENT)}${line.trim()}`));
+        const result = await handleSlash(line, {
+          rl,
+          session,
+          print: (text) => box.print(text),
+          pick: (pickOptions) => box.pick(pickOptions),
+          loading: (text) => {
+            box.setBusy(text !== null);
+            if (text) box.setActivity(text);
+          },
+          suspend: () => box.unmount(),
+          clearScreen: () => box.clearScreen(),
+        });
         if (result === 'exit') break;
+        box.print('');
         continue;
       }
 
       box.print(`${userMessage(line)}\n`);
       if (!session.modelId) {
-        box.print(`${' '.repeat(CONTENT_INDENT)}${style.yellow('Choose a model first:')} ${style.accent('/model')}\n`);
+        box.print(`${' '.repeat(CONTENT_INDENT)}${style.yellow('Choose a model first:')} ${style.accent('/models')}\n`);
         continue;
       }
 
