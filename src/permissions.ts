@@ -38,10 +38,20 @@ export function resolvePermissionMode(options: PermissionOptions): PermissionMod
   return (options.permissionMode as PermissionMode | undefined) ?? 'default';
 }
 
-/** Wraps an interactive ask so the permission mode can answer first. */
-export function applyPermissionMode(mode: PermissionMode, ask: ConfirmFn): ConfirmFn {
+/** The mode after `mode` when cycling with Shift+Tab in `aiolah chat`. */
+export function nextPermissionMode(mode: PermissionMode): PermissionMode {
+  return PERMISSION_MODES[(PERMISSION_MODES.indexOf(mode) + 1) % PERMISSION_MODES.length]!;
+}
+
+/**
+ * Wraps an interactive ask so the permission mode can answer first. Pass a
+ * function to read the mode on every call (it can change mid-session).
+ */
+export function applyPermissionMode(mode: PermissionMode | (() => PermissionMode), ask: ConfirmFn): ConfirmFn {
+  const currentMode = typeof mode === 'function' ? mode : () => mode;
   return async (description, tool) => {
-    if (mode === 'bypassPermissions' || (mode === 'acceptEdits' && EDIT_TOOLS.has(tool))) {
+    const active = currentMode();
+    if (active === 'bypassPermissions' || (active === 'acceptEdits' && EDIT_TOOLS.has(tool))) {
       return true;
     }
     return ask(description, tool);

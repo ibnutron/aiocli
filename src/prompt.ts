@@ -42,7 +42,9 @@ export async function ask(rl: Interface, prompt: string): Promise<string | null>
   try {
     return await rl.question(prompt);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ERR_USE_AFTER_CLOSE') {
+    // ABORT_ERR: the interface was closed while this question was pending (Ctrl+C twice in chat).
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ERR_USE_AFTER_CLOSE' || code === 'ABORT_ERR') {
       return null;
     }
     throw error;

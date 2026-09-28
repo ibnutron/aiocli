@@ -13,29 +13,67 @@ import {
   setActiveSelection,
 } from './providers.js';
 import { connectFlow, disconnectCommand } from './commands/connect.js';
+import { style, tildify } from './ui.js';
 
-const HELP = `Commands:
-  /connect [provider]   connect aiolah or your own provider key
-  /disconnect <provider> remove a provider's key (or sign out of aiolah)
-  /provider [id]        switch provider (keeps the conversation)
-  /model [id]           switch model (lists the provider's models without an id)
-  /models               list the current provider's models
-  /sessions             list saved sessions (resume with: aiolah -r <id>)
-  /status               show provider, model, session and login
-  /help                 this help
-  /exit                 quit
-`;
+export interface SlashCommand {
+  name: string;
+  args?: string;
+  description: string;
+}
+
+/** Commands of `aiolah chat`, in the order the autocomplete menu and /help show them. */
+export const SLASH_COMMANDS: SlashCommand[] = [
+  { name: 'model', args: '[id]', description: "Switch model (lists the provider's models without an id)" },
+  { name: 'models', description: "List the current provider's models" },
+  { name: 'provider', args: '[id]', description: 'Switch provider (keeps the conversation)' },
+  { name: 'connect', args: '[provider]', description: 'Connect aiolah or your own provider key' },
+  { name: 'disconnect', args: '<provider>', description: "Remove a provider's key (or sign out of aiolah)" },
+  { name: 'status', description: 'Show provider, model, session and login' },
+  { name: 'sessions', description: 'List saved sessions (resume with: aiolah -r <id>)' },
+  { name: 'clear', description: 'Clear the screen' },
+  { name: 'help', description: 'Show commands and shortcuts' },
+  { name: 'exit', description: 'Quit' },
+];
+
+/** Commands whose name starts with `prefix` (without the slash). */
+export function matchSlashCommands(prefix: string): SlashCommand[] {
+  return SLASH_COMMANDS.filter((command) => command.name.startsWith(prefix.toLowerCase()));
+}
+
+function helpText(): string {
+  const width = Math.max(...SLASH_COMMANDS.map((command) => `/${command.name} ${command.args ?? ''}`.length)) + 2;
+  const commands = SLASH_COMMANDS.map(
+    (command) => `  ${style.accent(`/${command.name} ${command.args ?? ''}`.padEnd(width))}${style.gray(command.description)}`,
+  );
+  const shortcuts = [
+    ['/', 'commands (Tab completes)'],
+    ['esc', 'interrupt the running turn'],
+    ['shift+tab', 'cycle permission mode'],
+    ['ctrl+c', 'clear input · twice to quit'],
+    ['↑ ↓', 'input history'],
+  ].map(([key, description]) => `  ${style.bold(key!.padEnd(width))}${style.gray(description!)}`);
+  return `\n${style.bold('Commands')}\n${commands.join('\n')}\n\n${style.bold('Shortcuts')}\n${shortcuts.join('\n')}\n\n`;
+}
 
 /** Handles one `/command` typed in `aiolah chat`. Returns 'exit' to quit. */
 export async function handleSlash(line: string, rl: Interface, session: ChatSession): Promise<'handled' | 'exit'> {
-  const [command = '', ...args] = line.trim().slice(1).split(/\s+/);
+  const [typed = '', ...args] = line.trim().slice(1).split(/\s+/);
   const arg = args.join(' ').trim() || undefined;
+  // `/mod` runs the first matching command, like picking it from the menu.
+  const command = SLASH_COMMANDS.some((item) => item.name === typed)
+    ? typed
+    : (matchSlashCommands(typed)[0]?.name ?? typed);
 
   try {
     switch (command) {
       case 'help':
       case '?':
-        stdout.write(HELP);
+      case '':
+        stdout.write(helpText());
+        return 'handled';
+
+      case 'clear':
+        stdout.write('\x1b[2J\x1b[3J\x1b[H');
         return 'handled';
 
       case 'exit':
@@ -98,7 +136,9 @@ export async function handleSlash(line: string, rl: Interface, session: ChatSess
 
       case 'models': {
         const models = await listProviderModels(session.providerId);
-        stdout.write(models.map((id) => `${id === session.modelId ? '●' : ' '} ${id}`).join('\n') + '\n');
+        stdout.write(
+          models.map((id) => (id === session.modelId ? style.accent(`● ${id}`) : `  ${id}`)).join('\n') + '\n',
+        );
         return 'handled';
       }
 
@@ -107,31 +147,35 @@ export async function handleSlash(line: string, rl: Interface, session: ChatSess
         stdout.write(
           sessions.length
             ? sessions
-                .map((item) => `${item.id}  ${item.updatedAt.slice(0, 16).replace('T', ' ')}  ${item.workspace}`)
+                .map(
+                  (item) =>
+                    `${style.accent(item.id)}  ${style.gray(item.updatedAt.slice(0, 16).replace('T', ' '))}  ${tildify(item.workspace)}`,
+                )
                 .join('\n') + '\n'
-            : 'No saved sessions.\n',
+            : style.gray('No saved sessions.\n'),
         );
         return 'handled';
       }
 
       case 'status': {
         const auth = readAuth();
+        const row = (label: string, value: string) => `  ${style.gray(label.padEnd(10))}${value}\n`;
         stdout.write(
-          `provider  ${providerDef(session.providerId).name} [${session.providerId}]\n` +
-            `model     ${session.modelId}\n` +
-            `session   ${session.sessionId}\n` +
-            `workspace ${session.workspace}\n` +
-            `aiolah    ${auth ? `signed in as ${auth.user.email}` : 'not signed in'}\n`,
+          row('provider', `${providerDef(session.providerId).name} ${style.gray(`[${session.providerId}]`)}`) +
+            row('model', session.modelId || style.yellow('none — /model')) +
+            row('session', session.sessionId) +
+            row('workspace', tildify(session.workspace)) +
+            row('aiolah', auth ? `signed in as ${auth.user.email}` : style.yellow('not signed in')),
         );
         return 'handled';
       }
 
       default:
-        stdout.write(`Unknown command /${command}. Type /help.\n`);
+        stdout.write(style.yellow(`Unknown command /${typed}. Type /help.\n`));
         return 'handled';
     }
   } catch (error) {
-    stdout.write(`[error] ${error instanceof Error ? error.message : String(error)}\n`);
+    stdout.write(style.red(`${error instanceof Error ? error.message : String(error)}\n`));
     return 'handled';
   }
 }
@@ -139,5 +183,5 @@ export async function handleSlash(line: string, rl: Interface, session: ChatSess
 function switchTo(session: ChatSession, provider: string, model: string): void {
   session.useModel(provider, model);
   setActiveSelection(provider, model);
-  stdout.write(`Now using ${providerDef(provider).name} · ${model}\n`);
+  stdout.write(`${style.green('✓')} Now using ${style.bold(model)} ${style.gray(`· ${providerDef(provider).name}`)}\n`);
 }
