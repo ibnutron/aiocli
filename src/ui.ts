@@ -270,3 +270,38 @@ export function scanner(frame: number, width = 8): string {
   }
   return bar;
 }
+
+/**
+ * Splits a styled line into rows of at most `width` visible columns; colors
+ * still open at a break are re-applied on the next row.
+ */
+export function wrapAnsi(line: string, width: number): string[] {
+  const rows: string[] = [];
+  // eslint-disable-next-line no-control-regex
+  const escape = /\x1b\[[0-9;?]*[a-zA-Z]/y;
+  let current = '';
+  let active = '';
+  let count = 0;
+  for (let index = 0; index < line.length; ) {
+    escape.lastIndex = index;
+    const match = escape.exec(line);
+    if (match) {
+      current += match[0];
+      if (match[0].endsWith('m')) {
+        active = match[0] === '\x1b[0m' ? '' : active + match[0];
+      }
+      index += match[0].length;
+      continue;
+    }
+    if (count === width) {
+      rows.push(active ? `${current}\x1b[0m` : current);
+      current = active;
+      count = 0;
+    }
+    current += line[index];
+    count += 1;
+    index += 1;
+  }
+  rows.push(current);
+  return rows;
+}

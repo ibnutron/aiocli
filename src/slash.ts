@@ -209,9 +209,9 @@ async function chooseModel(context: SlashContext): Promise<void> {
   const groups = await Promise.all(
     connected.map(async (provider): Promise<PickSection> => {
       try {
-        const models = await withTimeout(modelItems(provider.id), LIST_TIMEOUT_MS);
+        const { models, title } = await withTimeout(modelItems(provider.id), LIST_TIMEOUT_MS);
         return {
-          title: provider.name,
+          title: title ?? provider.name,
           items: models.map((model) => ({
             label: model.label,
             hint: model.hint,
@@ -273,17 +273,22 @@ async function chooseModel(context: SlashContext): Promise<void> {
   }
 }
 
-/** Models of one provider with display labels (aiolah's catalog has names and plan tiers). */
-async function modelItems(provider: string): Promise<{ id: string; label: string; hint?: string }[]> {
+/** Models of one provider with display labels (aiolah's catalog has names, tiers and the plan name). */
+async function modelItems(
+  provider: string,
+): Promise<{ title?: string; models: { id: string; label: string; hint?: string }[] }> {
   if (providerDef(provider).kind === 'aiolah') {
-    const { data } = await fetchModels();
-    return data.map((model) => ({
-      id: model.id,
-      label: model.name || model.id,
-      hint: model.tier ? model.tier.charAt(0).toUpperCase() + model.tier.slice(1) : undefined,
-    }));
+    const { data, plan } = await fetchModels();
+    return {
+      title: plan?.name ? `aiolah · ${plan.name}` : undefined,
+      models: data.map((model) => ({
+        id: model.id,
+        label: model.name || model.id,
+        hint: model.tier ? model.tier.charAt(0).toUpperCase() + model.tier.slice(1) : undefined,
+      })),
+    };
   }
-  return (await listProviderModels(provider)).map((id) => ({ id, label: id }));
+  return { models: (await listProviderModels(provider)).map((id) => ({ id, label: id })) };
 }
 
 async function connect(context: SlashContext, providerId?: string): Promise<void> {

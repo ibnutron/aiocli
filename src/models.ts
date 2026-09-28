@@ -13,12 +13,19 @@ export interface CliModel {
  * Coding models the logged-in account's plan may use, read live from aiolah —
  * models activated by an admin (or a plan upgrade) show up without a CLI release.
  */
-export async function fetchModels(): Promise<{ default: string | null; data: CliModel[] }> {
+export interface CliModelList {
+  /** The account's plan (sent by aiolah since the plan label was added; older servers omit it). */
+  plan?: { name: string };
+  default: string | null;
+  data: CliModel[];
+}
+
+export async function fetchModels(): Promise<CliModelList> {
   const auth = readAuth();
   if (!auth) {
     throw new Error('Not logged in. Run `aiolah auth login` (or set ANTHROPIC_API_KEY to use your own key).');
   }
-  const response = await apiRequest<{ default: string | null; data: CliModel[] }>(serverUrl(auth), '/api/cli/models', {
+  const response = await apiRequest<CliModelList>(serverUrl(auth), '/api/cli/models', {
     token: auth.token,
   });
   if (response.status === 401 || response.status === 403) {

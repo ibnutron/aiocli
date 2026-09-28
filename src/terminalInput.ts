@@ -15,6 +15,7 @@ import {
   truncate,
   visibleLength,
   wordmark,
+  wrapAnsi,
 } from './ui.js';
 
 interface Key {
@@ -23,6 +24,8 @@ interface Key {
   meta?: boolean;
   shift?: boolean;
   sequence?: string;
+  /** Raw CSI code; `[<` starts an SGR mouse report. */
+  code?: string;
 }
 
 type TtyWrite = (sequence: string | undefined, key: Key | undefined) => void;
@@ -72,6 +75,16 @@ export interface PickOptions {
 
 type PickRow = { header: string } | { item: PickItem };
 
+/** Clickable area of the box: `row` is an index into the laid-out lines, columns are 0-based. */
+interface Hotspot {
+  row: number;
+  from: number;
+  to: number;
+  action: () => void;
+}
+
+const MAX_TRANSCRIPT = 2000;
+
 interface PickState {
   options: PickOptions;
   query: string;
@@ -99,8 +112,23 @@ export class TerminalInput {
   private original: TtyWrite | null = null;
   private mounted = false;
   private home = false;
-  /** Row of the terminal cursor inside the drawn region (0 = region top). */
-  private cursorRow = 0;
+  /** The box was taken down for plain readline output (connect); re-anchor on mount. */
+  private suspended = false;
+
+  /**
+   * Screen model: the box is always drawn on the last `regionHeight` rows;
+   * above it, `contentRows` rows show the end of `transcript` (everything
+   * printed), top-aligned until the screen fills up, then scrolling.
+   */
+  private readonly transcript: string[] = [];
+  private contentRows = 0;
+  private regionHeight = 0;
+  private regionTop = 1;
+  private lineOffset = 0;
+  private hotspots: Hotspot[] = [];
+  private mouseOn = false;
+  /** SGR mouse report being assembled from single-character key events. */
+  private mouseReport: string | null = null;
 
   private buffer = '';
   private cursor = 0;
@@ -148,12 +176,13 @@ export class TerminalInput {
     rl.setPrompt('');
     stdout.on('resize', () => {
       if (this.mounted) {
-        if (this.home) {
-          stdout.write('\x1b[2J\x1b[H');
-          this.cursorRow = 0;
-        }
+        stdout.write('\x1b[2J');
+        this.regionHeight = 0;
         this.render();
       }
+    });
+    process.once('exit', () => {
+      stdout.write('\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?25h');
     });
   }
 
@@ -168,7 +197,9 @@ export class TerminalInput {
     }
     stdout.write('\x1b[2J\x1b[3J\x1b[H');
     this.home = true;
-    this.cursorRow = 0;
+    this.transcript.length = 0;
+    this.contentRows = 0;
+    this.regionHeight = 0;
   }
 
   /** One-off hint under the box (cleared on the next key press). */
@@ -191,25 +222,50 @@ export class TerminalInput {
     });
   }
 
-  /** Writes `text` (one or more lines) above the box. */
+  /**
+   * Writes `text` (one or more lines) above the box. Once the area above the
+   * box is full, the whole screen scrolls (so older lines reach the terminal's
+   * scrollback) and the box is redrawn at the bottom.
+   */
   print(text: string): void {
     if (!this.mounted) {
       stdout.write(`${text}\n`);
       return;
     }
-    stdout.write(`${this.eraseSequence()}${text}\n`);
-    this.cursorRow = 0;
+    const width = columns();
+    const lines = text.split('\n').flatMap((line) => wrapAnsi(line, width));
+    this.transcript.push(...lines);
+    this.transcript.splice(0, Math.max(0, this.transcript.length - MAX_TRANSCRIPT));
+
+    const rows = screenRows();
+    const area = Math.max(1, rows - this.regionHeight);
+    let output = '\x1b[?2026h\x1b[?25l';
+    for (let start = 0; start < lines.length; start += area) {
+      const chunk = lines.slice(start, start + area);
+      const scroll = Math.max(0, chunk.length - (area - this.contentRows));
+      if (scroll) {
+        output += `\x1b[${rows};1H${'\n'.repeat(scroll)}`;
+      }
+      const first = this.contentRows - scroll + 1;
+      chunk.forEach((line, index) => {
+        output += `\x1b[${first + index};1H\x1b[2K${line}`;
+      });
+      this.contentRows = first - 1 + chunk.length;
+    }
+    stdout.write(output);
     this.render();
   }
 
-  /** Removes the box and gives the terminal back to plain readline (slash commands, pickers). */
+  /** Removes the box and gives the terminal back to plain readline (connect asks for keys). */
   unmount(): void {
     if (!this.mounted) {
       return;
     }
-    stdout.write(`${this.eraseSequence()}\x1b[?25h\x1b[?2004l`);
+    stdout.write(`\x1b[${this.regionTop};1H\x1b[J\x1b[?25h\x1b[?2004l${this.mouseOn ? '\x1b[?1000l\x1b[?1006l' : ''}`);
+    this.mouseOn = false;
     this.mounted = false;
-    this.cursorRow = 0;
+    this.suspended = true;
+    this.regionHeight = 0;
   }
 
   /** Clears the screen and scrollback; the box stays at the bottom. */
@@ -219,8 +275,10 @@ export class TerminalInput {
       return;
     }
     this.home = false;
-    stdout.write(`\x1b[2J\x1b[3J\x1b[${stdout.rows || 24};1H`);
-    this.cursorRow = 0;
+    stdout.write('\x1b[2J\x1b[3J');
+    this.transcript.length = 0;
+    this.contentRows = 0;
+    this.regionHeight = 0;
     this.refresh();
   }
 
@@ -349,23 +407,25 @@ export class TerminalInput {
     return Math.max(4, (stdout.rows || 24) - 12);
   }
 
-  private pickLines(inner: number): { lines: string[]; searchRow: number } {
+  private pickLines(inner: number): { lines: string[]; searchRow: number; spots: Hotspot[] } {
     const state = this.picking!;
     const rows = pickRows(state);
     const lines: string[] = [];
+    const spots: Hotspot[] = [];
+    const contentColumn = MARGIN + 3;
     lines.push(panelRow(''));
     const title = style.bold(style.white(state.options.title));
+    spots.push({ row: lines.length, from: contentColumn + inner - 5, to: contentColumn + inner + 2, action: () => this.finishPick(null) });
     lines.push(panelRow(`${title}${' '.repeat(Math.max(1, inner - visibleLength(title) - 3))}${style.gray('esc')}`));
     lines.push(panelRow(''));
     const searchRow = lines.length;
     lines.push(panelRow(state.query ? style.white(truncate(state.query, inner)) : style.gray('Search')));
     lines.push(panelRow(''));
 
-    // Keep the selected item in view.
     let selectableIndex = -1;
     const rendered = rows.map((row) => {
       if ('header' in row) {
-        return { text: style.accent(style.bold(truncate(row.header, inner))), selected: false };
+        return { text: style.accent(style.bold(truncate(row.header, inner))), selected: false, value: undefined };
       }
       const { item } = row;
       const isSelected = !item.disabled && ++selectableIndex === state.selected;
@@ -376,29 +436,46 @@ export class TerminalInput {
       const detail = item.detail ? truncate(item.detail, Math.max(0, room - label.length - 1)) : '';
       const plain = `${marker}${label}${detail ? ` ${detail}` : ''}`;
       const gap = ' '.repeat(Math.max(hint ? 2 : 0, inner - plain.length - hint.length));
+      const value = item.disabled ? undefined : item.value;
       if (isSelected) {
         const text = `${plain}${gap}${hint}`.padEnd(inner);
-        return { text: COLOR ? `\x1b[48;5;141m\x1b[30m${text}\x1b[39m\x1b[49m` : `>${text.slice(1)}`, selected: true };
+        return {
+          text: COLOR ? `\x1b[48;5;141m\x1b[30m${text}\x1b[39m\x1b[49m` : `>${text.slice(1)}`,
+          selected: true,
+          value,
+        };
       }
       const styledLabel = item.disabled ? style.gray(label) : style.white(label);
       return {
         text: `${marker}${styledLabel}${detail ? ` ${style.gray(detail)}` : ''}${gap}${style.gray(hint)}`,
         selected: false,
+        value,
       };
     });
     if (!rendered.length) {
-      rendered.push({ text: style.gray('No matches'), selected: false });
+      rendered.push({ text: style.gray('No matches'), selected: false, value: undefined });
     }
+    // Keep the selected item in view.
     const height = this.pickListHeight();
     const selectedAt = Math.max(0, rendered.findIndex((row) => row.selected));
     const start = Math.min(Math.max(0, selectedAt - Math.floor(height / 2)), Math.max(0, rendered.length - height));
     for (const row of rendered.slice(start, start + height)) {
+      const { value } = row;
+      if (value !== undefined) {
+        spots.push({ row: lines.length, from: MARGIN, to: contentColumn + inner + 2, action: () => this.finishPick(value) });
+      }
       lines.push(panelRow(row.text));
     }
 
     const actions = state.options.actions ?? [];
     if (actions.length) {
       lines.push(panelRow(''));
+      let column = contentColumn;
+      for (const action of actions) {
+        const width = `${action.label} ctrl+${action.key}`.length;
+        spots.push({ row: lines.length, from: column, to: column + width, action: () => this.finishPick(action.value) });
+        column += width + 3;
+      }
       lines.push(
         panelRow(
           truncateStyled(
@@ -409,13 +486,23 @@ export class TerminalInput {
       );
     }
     lines.push(panelRow(''));
-    return { lines, searchRow };
+    return { lines, searchRow, spots };
   }
 
   private mount(): void {
     if (!this.mounted) {
       // Bracketed paste: a pasted multi-line text arrives as one message, not one per line.
       stdout.write('\x1b[?2004h');
+    }
+    if (this.suspended) {
+      // Plain readline wrote below the old box: scroll it up out of the box's way
+      // and keep it on screen (it isn't in the transcript, so don't repaint over it).
+      const rows = screenRows();
+      const height = Math.min(this.layout().lines.length, rows);
+      stdout.write(`\x1b[${rows};1H${'\n'.repeat(height)}`);
+      this.regionHeight = height;
+      this.contentRows = rows - height;
+      this.suspended = false;
     }
     this.mounted = true;
     this.render();
@@ -430,6 +517,20 @@ export class TerminalInput {
   private onKey(sequence: string | undefined, key: Key): void {
     if (!this.mounted) {
       this.original!(sequence, key);
+      return;
+    }
+    if (this.mouseReport !== null) {
+      if (sequence === 'M' || sequence === 'm') {
+        const report = this.mouseReport;
+        this.mouseReport = null;
+        this.onMouse(report, sequence === 'M');
+      } else {
+        this.mouseReport += sequence ?? '';
+      }
+      return;
+    }
+    if (key.code === '[<') {
+      this.mouseReport = '';
       return;
     }
     const typing = Date.now() - this.lastKeyAt < 400;
@@ -471,8 +572,7 @@ export class TerminalInput {
         return;
       }
       if (key.name === 'tab') {
-        this.setBuffer(`/${this.menu[this.selected]!.name} `);
-        this.afterEdit();
+        this.runMenuItem(this.menu[this.selected]!);
         return;
       }
       if (key.name === 'escape') {
@@ -481,8 +581,7 @@ export class TerminalInput {
         return;
       }
       if (key.name === 'return' || key.name === 'enter') {
-        this.setBuffer(`/${this.menu[this.selected]!.name}`);
-        this.submit();
+        this.runMenuItem(this.menu[this.selected]!);
         return;
       }
     }
@@ -553,13 +652,33 @@ export class TerminalInput {
           : plain === 'n' || key.name === 'escape' || (key.ctrl && key.name === 'c')
             ? 'no'
             : null;
-    if (!answer) {
+    if (answer) {
+      this.answerConfirm(answer);
+    }
+  }
+
+  private answerConfirm(answer: ConfirmAnswer): void {
+    const pending = this.pendingConfirm;
+    if (!pending) {
       return;
     }
-    const { resolve } = this.pendingConfirm!;
     this.pendingConfirm = null;
     this.render();
-    resolve(answer);
+    pending.resolve(answer);
+  }
+
+  /**
+   * Menu choice (Tab, Enter or a click): commands that need an argument are
+   * completed into the input, the others run right away.
+   */
+  private runMenuItem(item: SlashCommand): void {
+    if (item.args?.startsWith('<')) {
+      this.setBuffer(`/${item.name} `);
+      this.afterEdit();
+      return;
+    }
+    this.setBuffer(`/${item.name}`);
+    this.submit();
   }
 
   /** Cursor movement, deletion, history and plain typing. Returns false for ignored keys. */
@@ -668,13 +787,8 @@ export class TerminalInput {
     this.draft = '';
     this.menu = [];
     this.setBuffer('');
-    if (this.home) {
-      // Leave the home screen. Start drawing from the last row so the box sits at the
-      // bottom and the conversation scrolls up above it.
-      this.home = false;
-      stdout.write(`\x1b[2J\x1b[3J\x1b[${stdout.rows || 24};1H`);
-      this.cursorRow = 0;
-    }
+    // Leaving the home screen: the box shrinks to the bottom, the conversation starts at the top.
+    this.home = false;
     if (this.pendingRead) {
       this.render();
       this.finishRead(text);
@@ -689,28 +803,64 @@ export class TerminalInput {
     this.finishRead(null);
   }
 
-  /** Moves to the region's top-left and clears everything below. */
-  private eraseSequence(): string {
-    return `${this.cursorRow > 0 ? `\x1b[${this.cursorRow}A` : ''}\r\x1b[J`;
-  }
-
+  /** Draws the box on the bottom rows (and the conversation above it when the box changed height). */
   private render(): void {
-    const { lines, cursor } = this.layout();
-    const rows = stdout.rows || 24;
-    // Never draw more than fits, or relative cursor moves would lose the region top.
-    const visible = lines.slice(Math.max(0, lines.length - rows));
-    const cursorRow = Math.max(0, cursor.row - (lines.length - visible.length));
+    const { lines, cursor, hotspots } = this.layout();
+    const rows = screenRows();
+    const height = Math.min(lines.length, rows);
+    const offset = lines.length - height;
+    const top = rows - height + 1;
 
-    let output = `\x1b[?2026h\x1b[?25l${this.eraseSequence()}${visible.join('\r\n')}`;
-    const up = visible.length - 1 - cursorRow;
-    output += `${up > 0 ? `\x1b[${up}A` : ''}\r${cursor.col > 0 ? `\x1b[${cursor.col}C` : ''}`;
-    output += this.pendingConfirm ? '' : '\x1b[?25h';
-    output += '\x1b[?2026l';
+    let output = '\x1b[?2026h\x1b[?25l';
+    if (height !== this.regionHeight) {
+      output += this.paintContent(rows - height);
+    }
+    lines.slice(offset).forEach((line, index) => {
+      output += `\x1b[${top + index};1H\x1b[2K${line}`;
+    });
+
+    // Mouse reporting only while a dialog is open, so text selection works otherwise.
+    const wantMouse = Boolean(this.picking || this.pendingConfirm);
+    if (wantMouse !== this.mouseOn) {
+      output += wantMouse ? '\x1b[?1000h\x1b[?1006h' : '\x1b[?1000l\x1b[?1006l';
+      this.mouseOn = wantMouse;
+    }
+
+    const cursorRow = Math.max(top, top + cursor.row - offset);
+    output += `\x1b[${cursorRow};${cursor.col + 1}H${this.pendingConfirm ? '' : '\x1b[?25h'}\x1b[?2026l`;
     stdout.write(output);
-    this.cursorRow = cursorRow;
+
+    this.regionHeight = height;
+    this.regionTop = top;
+    this.lineOffset = offset;
+    this.hotspots = hotspots;
   }
 
-  private layout(): { lines: string[]; cursor: { row: number; col: number } } {
+  /** Repaints the rows above the box with the end of the transcript. */
+  private paintContent(area: number): string {
+    const tail = area > 0 ? this.transcript.slice(-area) : [];
+    let output = '';
+    for (let row = 1; row <= area; row += 1) {
+      output += `\x1b[${row};1H\x1b[2K${tail[row - 1] ?? ''}`;
+    }
+    this.contentRows = tail.length;
+    return output;
+  }
+
+  private onMouse(report: string, pressed: boolean): void {
+    const [button = 0, x = 0, y = 0] = report.split(';').map(Number);
+    if (this.picking && (button === 64 || button === 65)) {
+      this.onPickKey(undefined, { name: button === 64 ? 'up' : 'down' });
+      return;
+    }
+    if (!pressed || button !== 0) {
+      return;
+    }
+    const row = y - this.regionTop + this.lineOffset;
+    this.hotspots.find((spot) => spot.row === row && x - 1 >= spot.from && x - 1 < spot.to)?.action();
+  }
+
+  private layout(): { lines: string[]; cursor: { row: number; col: number }; hotspots: Hotspot[] } {
     const width = columns();
     const inner = panelContentWidth();
     const info = this.info();
@@ -730,10 +880,12 @@ export class TerminalInput {
     });
 
     let box: string[] = [panelRow('')];
+    let boxSpots: Hotspot[] = [];
     let cursor = { row: 0, col: 0 };
     if (this.picking) {
-      const { lines: pickLines, searchRow } = this.pickLines(inner);
+      const { lines: pickLines, searchRow, spots } = this.pickLines(inner);
       box = pickLines;
+      boxSpots = spots;
       cursor = { row: searchRow, col: contentColumn + Math.min(this.picking.query.length, inner) };
     } else if (this.pendingConfirm) {
       box.push(panelRow(style.yellow('△ Permission required')));
@@ -741,6 +893,12 @@ export class TerminalInput {
         box.push(panelRow(style.white(row)));
       }
       box.push(panelRow(''));
+      const answer = (value: ConfirmAnswer) => () => this.answerConfirm(value);
+      boxSpots = [
+        { row: box.length, from: contentColumn, to: contentColumn + 11, action: answer('yes') },
+        { row: box.length, from: contentColumn + 13, to: contentColumn + 21, action: answer('always') },
+        { row: box.length, from: contentColumn + 23, to: contentColumn + 31, action: answer('no') },
+      ];
       box.push(
         panelRow(`${style.white('enter')} ${style.gray('allow')}  ${style.white('a')} ${style.gray('always')}  ${style.white('esc')} ${style.gray('deny')}`),
       );
@@ -783,7 +941,7 @@ export class TerminalInput {
       const mark = wordmark();
       const pad = ' '.repeat(Math.max(0, Math.floor((width - mark.width) / 2)));
       // Center logo + box ignoring the menu, so opening the menu doesn't move the box.
-      const rows = stdout.rows || 24;
+      const rows = screenRows();
       const above = Math.max(1, Math.floor((rows - (6 + box.length + 1) - 1) / 2) - 1);
       top = [...Array<string>(above).fill(''), ...mark.lines.map((line) => pad + line), '', ''];
       const version = info.version;
@@ -803,11 +961,26 @@ export class TerminalInput {
       spacer = Array<string>(Math.max(1, rows - used - (menuLines.length - taken))).fill('');
     }
 
-    lines.push(...top, ...menuLines);
+    lines.push(...top);
+    const menuStart = lines.length;
+    lines.push(...menuLines);
     const boxStart = lines.length;
     lines.push(...box, statusLine, ...spacer, ...footer);
-    return { lines, cursor: { row: boxStart + cursor.row, col: cursor.col } };
+    const hotspots: Hotspot[] = [
+      ...this.menu.map((item, index) => ({
+        row: menuStart + index,
+        from: MARGIN,
+        to: width,
+        action: () => this.runMenuItem(item),
+      })),
+      ...boxSpots.map((spot) => ({ ...spot, row: boxStart + spot.row })),
+    ];
+    return { lines, cursor: { row: boxStart + cursor.row, col: cursor.col }, hotspots };
   }
+}
+
+function screenRows(): number {
+  return Math.max(8, stdout.rows || 24);
 }
 
 /** The dialog's rows after filtering by the search query (every word must match). */

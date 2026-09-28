@@ -60,7 +60,7 @@ function local(id: string, name: string, baseURL: string): ProviderDef {
  * follow models.dev (the catalog opencode uses) or the provider's own docs.
  */
 export const PROVIDERS: ProviderDef[] = [
-  { id: 'aiolah', name: 'aiolah (your plan)', kind: 'aiolah', needsKey: false, popular: true },
+  { id: 'aiolah', name: 'aiolah', kind: 'aiolah', needsKey: false, popular: true },
   {
     id: 'anthropic',
     name: 'Anthropic',
