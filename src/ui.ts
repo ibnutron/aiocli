@@ -1,11 +1,14 @@
+import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { stdout } from 'node:process';
 
 /**
- * Terminal styling for the interactive chat (no dependencies). Colors are
- * off when stdout is not a TTY or NO_COLOR is set, so piped output stays plain.
+ * Terminal styling for the interactive chat (no dependencies), modelled on
+ * opencode's TUI. Colors are off when stdout is not a TTY or NO_COLOR is set,
+ * so piped output stays plain.
  */
-const COLOR = stdout.isTTY === true && !process.env.NO_COLOR && process.env.TERM !== 'dumb';
+export const COLOR = stdout.isTTY === true && !process.env.NO_COLOR && process.env.TERM !== 'dumb';
 
 function paint(open: string, close: string): (text: string) => string {
   return (text) => (COLOR ? `\x1b[${open}m${text}\x1b[${close}m` : text);
@@ -13,29 +16,33 @@ function paint(open: string, close: string): (text: string) => string {
 
 export const style = {
   bold: paint('1', '22'),
-  dim: paint('2', '22'),
   italic: paint('3', '23'),
   red: paint('31', '39'),
   green: paint('32', '39'),
   yellow: paint('33', '39'),
-  blue: paint('34', '39'),
+  blue: paint('38;5;75', '39'),
   cyan: paint('36', '39'),
   gray: paint('90', '39'),
+  white: paint('97', '39'),
   /** aiolah brand accent. */
   accent: paint('38;5;141', '39'),
-  inverse: paint('7', '27'),
+  /** Background of the input box and user messages. */
+  panel: paint('48;5;235', '49'),
+  /** Foreground in the panel color, for the half-block bottom edge. */
+  panelEdge: paint('38;5;235', '39'),
+  /** Custom 256-color foreground. */
+  fg: (color: number, text: string) => (COLOR ? `\x1b[38;5;${color}m${text}\x1b[39m` : text),
 };
 
-export const isInteractiveTerminal = stdout.isTTY === true;
-
-export function terminalWidth(): number {
-  return Math.max(40, Math.min(stdout.columns || 80, 120));
+/** Full terminal width (at least 30 columns). */
+export function columns(): number {
+  return Math.max(30, stdout.columns || 80);
 }
 
 /** Visible length, ignoring ANSI escapes. */
 export function visibleLength(text: string): number {
   // eslint-disable-next-line no-control-regex
-  return text.replace(/\x1b\[[0-9;]*m/g, '').length;
+  return text.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').length;
 }
 
 export function truncate(text: string, max: number): string {
@@ -49,182 +56,217 @@ export function tildify(path: string): string {
   return home && path.startsWith(home) ? `~${path.slice(home.length)}` : path;
 }
 
-/** A dim full-width rule, optionally with labels on the left and right. */
-export function rule(left = '', right = ''): string {
-  const width = terminalWidth();
-  const leftPart = left ? `${style.gray('── ')}${left} ` : '';
-  const rightPart = right ? ` ${right}${style.gray(' ──')}` : '';
-  const fill = Math.max(2, width - visibleLength(leftPart) - visibleLength(rightPart));
-  return `${leftPart}${style.gray('─'.repeat(fill))}${rightPart}`;
-}
-
-const LOGO = ['▗▄▄▄▖', '▐▛▀▜▌', '▝▀▀▀▘'];
-
-export interface BannerInfo {
-  version: string;
-  provider: string;
-  model: string;
-  account?: string;
-  workspace: string;
-}
-
-/** Welcome header shown when `aiolah chat` starts. */
-export function banner(info: BannerInfo): string {
-  const lines = [
-    `${style.bold('aiolah')} ${style.gray(`v${info.version}`)}`,
-    `${info.model ? style.bold(info.model) : style.yellow('no model')} ${style.gray('·')} ${info.provider}${
-      info.account ? style.gray(` · ${info.account}`) : ''
-    }`,
-    style.gray(tildify(info.workspace)),
-  ];
-  return LOGO.map((part, index) => ` ${style.accent(part)}  ${lines[index] ?? ''}`).join('\n') + '\n';
-}
-
-/** Tool call as a one-line title, e.g. `Read(src/app.ts)` or `Bash(npm test)`. */
-export function toolTitle(name: string, input: unknown): string {
-  const args = (input ?? {}) as Record<string, unknown>;
-  const labels: Record<string, [string, string]> = {
-    read_file: ['Read', 'path'],
-    write_file: ['Write', 'path'],
-    edit_file: ['Update', 'path'],
-    list_dir: ['List', 'path'],
-    run_bash: ['Bash', 'command'],
-  };
-  const [label, key] = labels[name] ?? [name, ''];
-  const argument = key ? String(args[key] ?? '') : JSON.stringify(args);
-  return `${style.bold(label)}${style.gray('(')}${truncate(argument, terminalWidth() - label.length - 8)}${style.gray(')')}`;
-}
-
-/** Short summary of a tool result, shown under the tool title. */
-export function toolSummary(name: string, input: unknown, result: string): string {
-  const args = (input ?? {}) as Record<string, unknown>;
-  if (/^Error:/.test(result)) {
-    return style.red(truncate(result, terminalWidth() - 8));
-  }
-  if (result === 'User declined this action.') {
-    return style.yellow('Declined');
-  }
-  if (result.startsWith('Interrupted by the user')) {
-    return style.red('Interrupted');
-  }
-  const lineCount = (text: string) => (text ? text.replace(/\n$/, '').split('\n').length : 0);
-  switch (name) {
-    case 'read_file':
-      return `Read ${style.bold(String(lineCount(result)))} lines`;
-    case 'list_dir':
-      return `Listed ${style.bold(String(lineCount(result)))} entries`;
-    case 'write_file':
-      return `Wrote ${style.bold(String(lineCount(String(args.content ?? ''))))} lines to ${String(args.path ?? '')}`;
-    case 'edit_file': {
-      const removed = lineCount(String(args.old_string ?? ''));
-      const added = lineCount(String(args.new_string ?? ''));
-      return `Updated ${String(args.path ?? '')} ${style.green(`+${added}`)} ${style.red(`-${removed}`)}`;
-    }
-    case 'run_bash': {
-      const match = /^exit code: (-?\d+|null)\nstdout:\n([\s\S]*?)\nstderr:\n([\s\S]*)$/.exec(result);
-      if (!match) {
-        return truncate(result, terminalWidth() - 8);
+/** Hard-wraps plain text to `width` columns, breaking on spaces where possible. */
+export function wrapText(text: string, width: number): string[] {
+  const rows: string[] = [];
+  for (const line of text.split('\n')) {
+    let rest = line;
+    while (rest.length > width) {
+      let cut = rest.lastIndexOf(' ', width);
+      if (cut <= 0) {
+        cut = width;
       }
-      const [, code, out = '', err = ''] = match;
-      const output = (out.trim() || err.trim()).split('\n');
-      const preview = output
-        .slice(0, 3)
-        .map((line) => truncate(line, terminalWidth() - 8))
-        .join('\n     ');
-      const more = output.length > 3 ? style.gray(`\n     … +${output.length - 3} lines`) : '';
-      const status = code === '0' ? '' : style.red(`exit ${code}`) + (preview ? '\n     ' : '');
-      return `${status}${style.gray(preview) || (code === '0' ? style.gray('(no output)') : '')}${more}`;
+      rows.push(rest.slice(0, cut));
+      rest = rest.slice(cut).replace(/^ /, '');
     }
-    default:
-      return truncate(result, terminalWidth() - 8);
+    rows.push(rest);
   }
+  return rows;
 }
+
+/** Left margin of the box / message bar, and where text inside it starts. */
+export const MARGIN = 2;
+export const CONTENT_INDENT = MARGIN + 3;
 
 /**
- * Light Markdown rendering for model replies: headings, bold, inline code,
- * fenced code blocks, bullets and quotes. Keeps the text readable as-is when
- * colors are off.
+ * One row of an opencode-style panel: margin, colored bar, dark background.
+ * `content` must already fit in `panelContentWidth()`.
  */
-export function renderMarkdown(text: string): string {
-  if (!COLOR) {
-    return text;
-  }
+export function panelRow(content: string, bar: (text: string) => string = style.accent): string {
+  const width = panelContentWidth();
+  const padding = ' '.repeat(Math.max(0, width - visibleLength(content)));
+  // Re-open the background after any color reset inside the content.
+  const body = COLOR ? content.replace(/\x1b\[(0|49)m/g, '$&\x1b[48;5;235m') : content;
+  return `${' '.repeat(MARGIN)}${bar('┃')}${style.panel(`  ${body}${padding}  `)}`;
+}
+
+/** Text width inside a panel row: margin, bar and 2+2 padding, same margin on the right. */
+export function panelContentWidth(): number {
+  return columns() - MARGIN - 1 - 4 - MARGIN;
+}
+
+/** A submitted user message, shown as a panel in the conversation. */
+export function userMessage(text: string): string {
+  const rows = wrapText(text, panelContentWidth());
+  return [panelRow(''), ...rows.map((row) => panelRow(row)), panelRow('')].join('\n');
+}
+
+/** Model reply: light Markdown, wrapped and indented under the message panels. */
+export function assistantMessage(text: string): string {
+  const width = columns() - CONTENT_INDENT - MARGIN - 1;
+  const indent = ' '.repeat(CONTENT_INDENT);
   let inFence = false;
-  return text
-    .split('\n')
-    .map((line) => {
-      if (/^\s*```/.test(line)) {
-        inFence = !inFence;
-        return style.gray(line);
-      }
-      if (inFence) {
-        return style.cyan(line);
-      }
-      const heading = /^(#{1,6})\s+(.*)$/.exec(line);
-      if (heading) {
-        return style.bold(inline(heading[2] ?? ''));
-      }
-      if (/^\s*>\s?/.test(line)) {
-        return style.gray('│ ') + style.italic(inline(line.replace(/^\s*>\s?/, '')));
-      }
-      return inline(line.replace(/^(\s*)[-*]\s+/, '$1• '));
-    })
-    .join('\n');
+  const rows: string[] = [];
+  for (const line of text.split('\n')) {
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence;
+      rows.push(style.gray(line));
+      continue;
+    }
+    if (inFence) {
+      rows.push(...wrapText(line, width).map((row) => style.cyan(row)));
+      continue;
+    }
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (heading) {
+      rows.push(...wrapText(heading[2] ?? '', width).map((row) => style.bold(inline(row))));
+      continue;
+    }
+    if (/^\s*>\s?/.test(line)) {
+      rows.push(...wrapText(line.replace(/^\s*>\s?/, ''), width - 2).map((row) => style.gray('│ ') + style.italic(inline(row))));
+      continue;
+    }
+    rows.push(...wrapText(line.replace(/^(\s*)[-*]\s+/, '$1• '), width).map(inline));
+  }
+  return rows.map((row) => (row ? indent + row : '')).join('\n');
 }
 
 function inline(line: string): string {
+  if (!COLOR) {
+    return line;
+  }
   return line
     .replace(/`([^`]+)`/g, (_, code: string) => style.cyan(code))
     .replace(/\*\*([^*]+)\*\*/g, (_, bold: string) => style.bold(bold));
 }
 
-/** Indents every line after the first so a block lines up after a `● ` marker. */
-export function hangingIndent(text: string, indent = '  '): string {
-  return text.replace(/\n/g, `\n${indent}`);
+/** Tool call and its result in one line (plus a short preview for shell output). */
+export function toolLine(name: string, input: unknown, result: string): string {
+  const args = (input ?? {}) as Record<string, unknown>;
+  const indent = ' '.repeat(CONTENT_INDENT);
+  const room = columns() - CONTENT_INDENT - 12;
+  const path = truncate(String(args.path ?? ''), room);
+  const count = (text: string) => (text ? text.replace(/\n$/, '').split('\n').length : 0);
+
+  let suffix: string;
+  if (/^Error:/.test(result)) {
+    suffix = style.red(` · ${truncate(result.replace(/^Error:\s*/, ''), room)}`);
+  } else if (result === 'User declined this action.') {
+    suffix = style.yellow(' · declined');
+  } else if (result.startsWith('Interrupted by the user')) {
+    suffix = style.red(' · interrupted');
+  } else {
+    suffix = '';
+  }
+
+  switch (name) {
+    case 'read_file':
+      return `${indent}${style.gray('→')} Read ${style.gray(path)}${suffix || style.gray(` · ${count(result)} lines`)}`;
+    case 'list_dir':
+      return `${indent}${style.gray('→')} List ${style.gray(path)}${suffix || style.gray(` · ${count(result)} entries`)}`;
+    case 'write_file':
+      return `${indent}${style.gray('←')} Write ${style.gray(path)}${
+        suffix || style.gray(` · ${count(String(args.content ?? ''))} lines`)
+      }`;
+    case 'edit_file':
+      return `${indent}${style.gray('←')} Edit ${style.gray(path)}${
+        suffix ||
+        ` ${style.green(`+${count(String(args.new_string ?? ''))}`)} ${style.red(`-${count(String(args.old_string ?? ''))}`)}`
+      }`;
+    case 'run_bash': {
+      const title = `${indent}${style.gray('$')} ${truncate(String(args.command ?? ''), room)}`;
+      const match = /^exit code: (-?\d+|null)\nstdout:\n([\s\S]*?)\nstderr:\n([\s\S]*)$/.exec(result);
+      if (suffix || !match) {
+        return `${title}${suffix}`;
+      }
+      const [, code, out = '', err = ''] = match;
+      const output = (out.trim() || err.trim()).split('\n').filter(Boolean);
+      const preview = output.slice(0, 4).map((line) => `${indent}  ${style.gray(truncate(line, room))}`);
+      if (output.length > 4) {
+        preview.push(`${indent}  ${style.gray(`… +${output.length - 4} lines`)}`);
+      }
+      return [`${title}${code === '0' ? '' : style.red(` · exit ${code}`)}`, ...preview].join('\n');
+    }
+    default:
+      return `${indent}${style.gray('→')} ${name}${suffix}`;
+  }
 }
 
-const SPINNER_FRAMES = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
-const SPINNER_WORDS = ['Thinking', 'Working', 'Pondering', 'Cooking', 'Crafting', 'Brewing'];
+/** Short label of a running tool, for the status row under the input box. */
+export function toolActivity(name: string, input: unknown): string {
+  const args = (input ?? {}) as Record<string, unknown>;
+  const labels: Record<string, string> = {
+    read_file: `Reading ${String(args.path ?? '')}`,
+    list_dir: `Listing ${String(args.path ?? '')}`,
+    write_file: `Writing ${String(args.path ?? '')}`,
+    edit_file: `Editing ${String(args.path ?? '')}`,
+    run_bash: `Running ${String(args.command ?? '')}`,
+  };
+  return labels[name] ?? name;
+}
 
-/** "✻ Thinking… (3s · esc to interrupt)" on one line; a no-op outside a TTY. */
-export class Spinner {
-  private timer: NodeJS.Timeout | null = null;
-  private frame = 0;
-  private startedAt = 0;
-  private word = SPINNER_WORDS[0]!;
+/** "▣ Default · model · 3.2s" under a finished reply. */
+export function turnFooter(mode: string, model: string, milliseconds: number, failed = false): string {
+  const seconds = (milliseconds / 1000).toFixed(1);
+  return `${' '.repeat(CONTENT_INDENT)}${failed ? style.red('▣') : style.accent('▣')} ${mode} ${style.gray(
+    `· ${model} · ${seconds}s`,
+  )}`;
+}
 
-  start(): void {
-    if (!isInteractiveTerminal || this.timer) {
-      return;
+/** 4-row block letters for the home-screen wordmark. */
+const GLYPHS: Record<string, string[]> = {
+  a: ['    ', '▀▀▀█', '█▀▀█', '▀▀▀▀'],
+  i: ['▄', '▄', '█', '▀'],
+  o: ['    ', '█▀▀█', '█  █', '▀▀▀▀'],
+  l: ['█', '█', '█', '▀'],
+  h: ['█   ', '█▀▀█', '█  █', '▀  ▀'],
+};
+
+/** "aiolah" wordmark: "aio" dimmed, "lah" bright, like opencode's open/code. */
+export function wordmark(): { lines: string[]; width: number } {
+  const render = (word: string) =>
+    [0, 1, 2, 3].map((row) => [...word].map((letter) => GLYPHS[letter]![row]).join(' '));
+  const left = render('aio');
+  const right = render('lah');
+  return {
+    lines: left.map((part, row) => `${style.gray(part)} ${style.white(right[row]!)}`),
+    width: visibleLength(`${left[0]} ${right[0]}`),
+  };
+}
+
+/** Current git branch of `dir` (walking up to the repository root), or null. */
+export function gitBranch(dir: string): string | null {
+  for (let current = dir; ; current = dirname(current)) {
+    try {
+      let gitDir = join(current, '.git');
+      if (statSync(gitDir).isFile()) {
+        gitDir = resolve(current, readFileSync(gitDir, 'utf8').replace(/^gitdir:\s*/, '').trim());
+      }
+      const head = readFileSync(join(gitDir, 'HEAD'), 'utf8').trim();
+      return head.startsWith('ref: refs/heads/') ? head.slice('ref: refs/heads/'.length) : head.slice(0, 7);
+    } catch {
+      if (dirname(current) === current) {
+        return null;
+      }
     }
-    if (!this.startedAt) {
-      this.startedAt = Date.now();
-      this.word = SPINNER_WORDS[Math.floor(Math.random() * SPINNER_WORDS.length)]!;
-    }
-    stdout.write('\x1b[?25l');
-    this.render();
-    this.timer = setInterval(() => this.render(), 120);
   }
+}
 
-  /** Clears the line; `reset` also restarts the elapsed timer for the next turn. */
-  stop(reset = false): void {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-      stdout.write('\r\x1b[2K\x1b[?25h');
-    }
-    if (reset) {
-      this.startedAt = 0;
-    }
-  }
+const SCANNER_COLORS = [141, 98, 61, 60];
 
-  private render(): void {
-    this.frame = (this.frame + 1) % SPINNER_FRAMES.length;
-    const seconds = Math.floor((Date.now() - this.startedAt) / 1000);
-    stdout.write(
-      `\r\x1b[2K${style.accent(SPINNER_FRAMES[this.frame]!)} ${style.accent(`${this.word}…`)} ${style.gray(
-        `(${seconds}s · esc to interrupt)`,
-      )}`,
-    );
+/** Knight-rider bar shown while a turn runs ("--■■■--"), frame by frame. */
+export function scanner(frame: number, width = 8): string {
+  const span = width - 1;
+  const cycle = frame % (span * 2);
+  const head = cycle <= span ? cycle : span * 2 - cycle;
+  const direction = cycle <= span ? -1 : 1;
+  let bar = '';
+  for (let index = 0; index < width; index += 1) {
+    const distance = (index - head) * direction;
+    bar +=
+      distance >= 0 && distance < SCANNER_COLORS.length
+        ? style.fg(SCANNER_COLORS[distance]!, '■')
+        : style.fg(238, '-');
   }
+  return bar;
 }
