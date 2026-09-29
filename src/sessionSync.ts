@@ -44,6 +44,11 @@ export class SessionSync {
     return auth ? new SessionSync(auth, session, meta) : null;
   }
 
+  /** Links the session to a device on aiolah (after /remote-control in chat), so /code lists it there. */
+  linkHost(hostId: number): void {
+    void this.register({ hostId, origin: 'terminal' });
+  }
+
   private async register(meta: { hostId?: number; origin: PromptOrigin }): Promise<string | null> {
     try {
       const response = await apiRequest<{ uuid?: string }>(serverUrl(this.auth), '/api/v1/app/cli/sessions', {

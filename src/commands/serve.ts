@@ -9,14 +9,22 @@ import WebSocket, { WebSocketServer } from 'ws';
 import { ChatSession, TurnInterruptedError, type PromptOrigin } from '../session.js';
 import { SessionSync } from '../sessionSync.js';
 import { generateNonce, verifyChallenge } from '../auth.js';
-import { apiRequest, machineIdFor, readAuth, relayHostUrl, serverUrl, type StoredAuth } from '../config.js';
+import { readAuth, serverUrl, type StoredAuth } from '../config.js';
 import { findLatestSession } from '../persistence.js';
 import { ensureTrusted } from '../trust.js';
 import { mcpSummary, startMcp } from '../mcp/index.js';
 import { ask } from '../prompt.js';
-import { listProviderModels, providerDef, resolveSelection } from '../providers.js';
-import { fetchModels } from '../models.js';
-import { SESSION_SELECTOR, type ImageInput, type ModelOption, type RelayFrame, type WireMessage } from '../protocol.js';
+import { resolveSelection } from '../providers.js';
+import { SESSION_SELECTOR, type ImageInput, type WireMessage } from '../protocol.js';
+import {
+  MAX_IMAGES,
+  listModelOptions,
+  registerHost,
+  startRelay,
+  validImages,
+  type Peer,
+  type RemoteHooks,
+} from '../remote.js';
 import { resolvePermissionMode, type PermissionOptions } from '../permissions.js';
 import type { ConfirmFn } from '../tools/index.js';
 
@@ -32,11 +40,6 @@ interface ServeOptions extends PermissionOptions {
   key?: string;
 }
 
-/** A connected, authenticated client — a direct WebSocket or one relayed through aiolah. */
-interface Peer {
-  send(message: WireMessage): void;
-}
-
 /** One conversation the host serves: its clients, busy flag and open Allow/Deny prompts. */
 interface SessionRuntime {
   session: ChatSession;
@@ -50,51 +53,7 @@ const MAX_AUTH_ATTEMPTS = 3;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_ATTEMPTS = 5;
 const CONFIRM_TIMEOUT_MS = 5 * 60_000;
-const RELAY_BACKOFF_MAX_MS = 30_000;
-const RELAY_SILENCE_TIMEOUT_MS = 75_000;
-const MAX_IMAGES = 4;
-/** Base64 characters across all images of one prompt; keeps a frame under the relay's 4 MB limit. */
-const MAX_IMAGE_CHARS = 3_500_000;
-const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
-/** Attached images if they are acceptable, [] for none, null when they are not. */
-function validImages(images: unknown): ImageInput[] | null {
-  if (images === undefined || images === null) {
-    return [];
-  }
-  if (!Array.isArray(images) || images.length > MAX_IMAGES) {
-    return null;
-  }
-  let total = 0;
-  for (const image of images as Partial<ImageInput>[]) {
-    if (!image || !IMAGE_TYPES.has(String(image.media_type)) || typeof image.data !== 'string') {
-      return null;
-    }
-    total += image.data.length;
-  }
-  return total <= MAX_IMAGE_CHARS ? (images as ImageInput[]) : null;
-}
-
-/** Models a client may switch to: the plan's list for aiolah (with names), the provider's live list otherwise. */
-async function listModelOptions(provider: string): Promise<ModelOption[]> {
-  if (providerDef(provider).kind === 'aiolah') {
-    return (await fetchModels()).data.map((model) => ({ id: model.id, name: model.name }));
-  }
-  return (await listProviderModels(provider)).map((id) => ({ id }));
-}
-
-/**
- * Two ways to be reachable:
- * - relay (default after `aiolah auth login`): dial out to the aiolah relay,
- *   no open port, no certificate, no token; the machine shows up on /code
- *   automatically.
- * - direct (`--port`): listen for WebSocket clients that authenticate with
- *   AIOLAH_REMOTE_TOKEN (LAN, self-hosting, or no aiolah account).
- *
- * The host can serve several sessions at once: the main one (also typed into
- * from this terminal) plus any a client opens (`session=new`) or resumes by
- * id. When signed in, every session is reported to aiolah's Sessions list.
- */
 export async function serveCommand(options: ServeOptions): Promise<void> {
   const workspaceRoot = resolve(options.workspace);
   const resumeId = options.resume ?? (options.continue ? findLatestSession()?.id : undefined);
@@ -346,9 +305,20 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
     disconnect: (runtime, peer) => runtime.peers.delete(peer),
   };
 
-  const banner = relayMode
-    ? startRelay(auth as StoredAuth, hostId as number, deviceName, hooks)
-    : startDirect(options, hooks);
+  let banner: string;
+  if (relayMode) {
+    const relayAuth = auth as StoredAuth;
+    startRelay(
+      relayAuth,
+      hostId as number,
+      hooks,
+      (line) => stdout.write(`\n[${line}]\n`),
+      () => process.exit(1),
+    );
+    banner = `relay mode via ${serverUrl(relayAuth)} as "${deviceName}" (logged in as ${relayAuth.user.email})`;
+  } else {
+    banner = startDirect(options, hooks);
+  }
 
   stdout.write(
     `aiolah serve — ${banner}\nworkspace ${workspaceRoot}, session ${main.session.sessionId}\n` +
@@ -383,30 +353,8 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
   }
 }
 
-/** How a transport (direct or relay) hands clients to the session runtimes. */
-interface ServeHooks {
-  /** Attach a client to a session (none = main, `new`, or an id); null when it doesn't exist. */
-  connect(peer: Peer, selector?: string): Promise<SessionRuntime | null>;
-  message(runtime: SessionRuntime, peer: Peer, message: WireMessage): Promise<SessionRuntime>;
-  disconnect(runtime: SessionRuntime, peer: Peer): void;
-}
-
-/** Registers (or refreshes) this machine + folder as a device on aiolah and returns its id. */
-async function registerHost(auth: StoredAuth, workspaceRoot: string, name: string): Promise<number> {
-  const server = serverUrl(auth);
-  const registration = await apiRequest<{ host_id?: number }>(server, '/api/v1/app/cli/hosts', {
-    method: 'POST',
-    token: auth.token,
-    body: { machine_id: machineIdFor(workspaceRoot), name, workspace: workspaceRoot },
-  });
-  if (registration.status === 401 || registration.status === 403) {
-    throw new Error('Your aiolah login is no longer valid. Run `aiolah auth login` again.');
-  }
-  if (!registration.data.host_id) {
-    throw new Error(`Could not register this machine with ${server} (HTTP ${registration.status}).`);
-  }
-  return registration.data.host_id;
-}
+/** Transport hooks for the session runtimes of `serve`. */
+type ServeHooks = RemoteHooks<SessionRuntime>;
 
 /** Direct mode: listen on --port, clients answer an HMAC challenge with AIOLAH_REMOTE_TOKEN. */
 function startDirect(options: ServeOptions, hooks: ServeHooks): string {
@@ -495,110 +443,6 @@ function startDirect(options: ServeOptions, hooks: ServeHooks): string {
     `direct mode, listening on ${scheme}://localhost:${port}\n` +
     `Share this token with attach clients (never sent over the wire): ${token}`
   );
-}
-
-/**
- * Relay mode: keep one outbound WebSocket to the aiolah relay open
- * (reconnecting with backoff). Each client the relay pairs with us becomes a
- * Peer addressed by its clientId, attached to the session it asked for.
- */
-function startRelay(auth: StoredAuth, hostId: number, name: string, hooks: ServeHooks): string {
-  const server = serverUrl(auth);
-  const clients = new Map<string, { peer: Peer; runtime: SessionRuntime | null }>();
-  let backoff = 1000;
-
-  const connect = (): void => {
-    const socket = new WebSocket(relayHostUrl(server), {
-      headers: {
-        Authorization: `Bearer ${auth.token}`,
-        'X-Host-Id': String(hostId),
-      },
-    });
-    let silenceTimer: NodeJS.Timeout | undefined;
-    const resetSilenceTimer = () => {
-      clearTimeout(silenceTimer);
-      silenceTimer = setTimeout(() => socket.terminate(), RELAY_SILENCE_TIMEOUT_MS);
-    };
-
-    socket.on('open', () => {
-      backoff = 1000;
-      resetSilenceTimer();
-      stdout.write('\n[connected to aiolah relay — open /code on aiolah to control this machine]\n');
-    });
-    socket.on('ping', resetSilenceTimer);
-
-    socket.on('unexpected-response', (_request, response) => {
-      if (response.statusCode === 401 || response.statusCode === 403) {
-        stdout.write('\n[relay rejected this login — run `aiolah auth login` again]\n');
-        process.exit(1);
-      }
-      socket.terminate();
-    });
-
-    socket.on('message', (raw) => {
-      resetSilenceTimer();
-      let frame: RelayFrame;
-      try {
-        frame = JSON.parse(raw.toString()) as RelayFrame;
-      } catch {
-        return;
-      }
-
-      if (frame.type === 'relay_client_joined') {
-        const clientId = frame.clientId;
-        const client = {
-          peer: {
-            send: (message: WireMessage) => {
-              if (socket.readyState === WebSocket.OPEN) {
-                socket.send(JSON.stringify({ type: 'relay_msg', to: clientId, msg: message } satisfies RelayFrame));
-              }
-            },
-          },
-          runtime: null as SessionRuntime | null,
-        };
-        clients.set(clientId, client);
-        void hooks.connect(client.peer, frame.session).then((runtime) => {
-          client.runtime = runtime;
-        });
-      } else if (frame.type === 'relay_client_left') {
-        const client = clients.get(frame.clientId);
-        if (client) {
-          clients.delete(frame.clientId);
-          if (client.runtime) {
-            hooks.disconnect(client.runtime, client.peer);
-          }
-        }
-      } else if (frame.type === 'relay_msg' && frame.from) {
-        const client = clients.get(frame.from);
-        if (client?.runtime) {
-          void hooks.message(client.runtime, client.peer, frame.msg).then((runtime) => {
-            client.runtime = runtime;
-          });
-        }
-      }
-    });
-
-    socket.on('error', () => {
-      // 'close' follows and schedules the reconnect.
-    });
-
-    socket.on('close', () => {
-      clearTimeout(silenceTimer);
-      for (const client of clients.values()) {
-        if (client.runtime) {
-          hooks.disconnect(client.runtime, client.peer);
-        }
-      }
-      clients.clear();
-      stdout.write(`\n[relay connection lost — retrying in ${Math.round(backoff / 1000)}s]\n`);
-      setTimeout(connect, backoff);
-      backoff = Math.min(backoff * 2, RELAY_BACKOFF_MAX_MS);
-    });
-  };
-
-  connect();
-
-  return `relay mode via ${server} as "${name}" (logged in as ${auth.user.email})`;
 }
 
 function send(socket: WebSocket, message: WireMessage): void {

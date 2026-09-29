@@ -32,12 +32,18 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: 'disconnect', args: '<provider>', description: "Remove a provider's key (or sign out of aiolah)" },
   { name: 'status', description: 'Show provider, model, session and login' },
   { name: 'mcp', description: 'Show MCP servers and their tools' },
+  {
+    name: 'remote-control',
+    args: '[name]',
+    description: 'Control this chat from aiolah /code, the app or VS Code (again to disconnect)',
+  },
   { name: 'sessions', description: 'List saved sessions (resume with: aiolah -r <id>)' },
   { name: 'clear', description: 'Clear the screen' },
   { name: 'help', description: 'Show commands and shortcuts' },
   { name: 'exit', description: 'Quit' },
   { name: 'model', args: '[id]', description: 'Switch model', hidden: true },
   { name: 'provider', args: '[id]', description: 'Switch provider', hidden: true },
+  { name: 'rc', args: '[name]', description: 'Same as /remote-control', hidden: true },
 ];
 
 /** Menu commands whose name starts with `prefix` (without the slash). */
@@ -60,6 +66,8 @@ export interface SlashContext {
   /** Hands the terminal to plain readline (connect asks for keys); the box comes back on the next prompt. */
   suspend: () => void;
   clearScreen: () => void;
+  /** Turns /remote-control on (with an optional device name) or off. */
+  remoteControl?: (name?: string) => Promise<void>;
 }
 
 const CONNECT_ACTION = '\u0000connect';
@@ -190,6 +198,20 @@ export async function handleSlash(line: string, context: SlashContext): Promise<
 
       case 'mcp':
         print(formatMcpStatus(context.mcp?.status ?? []));
+        return 'handled';
+
+      case 'remote-control':
+      case 'rc':
+        if (!context.remoteControl) {
+          print(style.yellow('  Remote Control is only available in aiolah chat.'));
+          return 'handled';
+        }
+        context.loading('Connecting to aiolah…');
+        try {
+          await context.remoteControl(arg);
+        } finally {
+          context.loading(null);
+        }
         return 'handled';
 
       default:

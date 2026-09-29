@@ -37,6 +37,8 @@ export interface BoxInfo {
   provider: string;
   workspace: string;
   version: string;
+  /** This chat is shared with /code through /remote-control. */
+  remote?: boolean;
 }
 
 export interface TerminalInputHandlers {
@@ -657,6 +659,11 @@ export class TerminalInput {
     }
   }
 
+  /** Closes an open Allow/Deny question that was answered elsewhere (e.g. from /code). */
+  cancelConfirm(): void {
+    this.answerConfirm('no');
+  }
+
   private answerConfirm(answer: ConfirmAnswer): void {
     const pending = this.pendingConfirm;
     if (!pending) {
@@ -924,9 +931,10 @@ export class TerminalInput {
       ? `${scanner(this.frame)}  ${this.activity ? style.gray(truncate(this.activity, 24)) + '  ' : ''}${style.white('esc')} ${style.gray('interrupt')}`
       : this.notice;
     const queued = this.queue.length ? `${style.accent(`${this.queue.length} queued`)}  ` : '';
+    const remote = this.info().remote ? `${style.green('/rc active')}  ` : '';
     const right = this.picking
       ? `${style.white('↑↓')} ${style.gray('select')}  ${style.white('enter')} ${style.gray('confirm')}`
-      : `${queued}${style.white('shift+tab')} ${style.gray('mode')}  ${style.white('/')} ${style.gray('commands')}`;
+      : `${remote}${queued}${style.white('shift+tab')} ${style.gray('mode')}  ${style.white('/')} ${style.gray('commands')}`;
     const room = width - MARGIN * 2 - 1;
     const status =
       visibleLength(left) + visibleLength(right) + 2 <= room

@@ -72,6 +72,15 @@ The machine appears as a device on [aiolah.com/code](https://aiolah.com/code)
 open ports, certificates or tokens. Actions that change files or run commands
 show an Allow/Deny prompt there.
 
+Already chatting? Type **`/remote-control`** (or `/rc`, with an optional device
+name) inside `aiolah chat` to share that conversation instead of starting a new
+one — as in Claude Code. The footer shows **/rc active**; prompts sent from
+/code run in the terminal chat (marked "from /code"), what you type in the
+terminal shows up on /code, and an Allow/Deny question can be answered in
+either place (the first answer wins). Run `/remote-control` again to
+disconnect. It shares only this chat; use `aiolah rc` when /code should be
+able to start new sessions on the device. Needs 0.1.4 or newer.
+
 The Code page also lists your **sessions** — from `aiolah chat`, `aiolah -p`
 and `aiolah rc` — with their status (Working, Needs input, Ready for review,
 Completed), and you can filter, rename and archive them. **New session**
@@ -186,6 +195,8 @@ Inside `aiolah chat`, type `/` commands:
 | `/models` | List the current provider's models. |
 | `/sessions` | List saved sessions. |
 | `/status` | Show provider, model, session and login. |
+| `/mcp` | Show MCP servers, their tools and why one failed to start. |
+| `/remote-control [name]` | Share this chat with aiolah /code, the app or VS Code; again to disconnect. Alias: `/rc`. |
 | `/help`, `/exit` | Help, quit. |
 
 ## Permissions

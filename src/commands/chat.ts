@@ -1,8 +1,12 @@
 import * as readline from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
-import { resolve } from 'node:path';
-import { ChatSession, TurnInterruptedError } from '../session.js';
+import { hostname } from 'node:os';
+import { basename, resolve } from 'node:path';
+import { ChatSession, TurnInterruptedError, type PromptOrigin } from '../session.js';
 import { SessionSync } from '../sessionSync.js';
+import { ChatRemote } from '../remoteChat.js';
+import { readAuth } from '../config.js';
+import type { ImageInput } from '../protocol.js';
 import { findLatestSession } from '../persistence.js';
 import { ensureTrusted } from '../trust.js';
 import { mcpSummary, startMcp } from '../mcp/index.js';
@@ -44,6 +48,8 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
   /** Tools the user allowed for the rest of this session ("always" at the Allow prompt). */
   const alwaysAllowed = new Set<string>();
   let chat: ChatSession | undefined;
+  /** Set by /remote-control; shares this chat with /code. */
+  let remote: ChatRemote | undefined;
 
   const box = new TerminalInput(
     rl,
@@ -60,25 +66,38 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
       provider: chat ? providerDef(chat.providerId).name : '',
       workspace: workspaceRoot,
       version: packageVersion(),
+      remote: remote?.active ?? false,
     }),
   );
 
   // Only reached when the permission mode wants a human answer (see ChatSession).
+  // With /remote-control on, /code clients are asked too and the first answer wins.
   const confirm: ConfirmFn = async (description, tool) => {
     if (alwaysAllowed.has(tool)) {
       return true;
     }
-    const answer = await box.confirm(
-      description
-        .replace(/^run_bash: /, '$ ')
-        .replace(/^write_file: /, 'Write ')
-        .replace(/^edit_file: /, 'Edit ')
-        .replace(/^mcp: /, 'MCP '),
-    );
-    if (answer === 'always') {
+    const remoteQuestion = remote?.ask(description) ?? null;
+    const local = box
+      .confirm(
+        description
+          .replace(/^run_bash: /, '$ ')
+          .replace(/^write_file: /, 'Write ')
+          .replace(/^edit_file: /, 'Edit ')
+          .replace(/^mcp: /, 'MCP '),
+      )
+      .then((answer) => ({ answer }));
+    const first = remoteQuestion
+      ? await Promise.race([local, remoteQuestion.answer.then((allow) => ({ allow }))])
+      : await local;
+    if ('allow' in first) {
+      box.cancelConfirm();
+      return first.allow;
+    }
+    remoteQuestion?.cancel();
+    if (first.answer === 'always') {
       alwaysAllowed.add(tool);
     }
-    return answer !== 'no';
+    return first.answer !== 'no';
   };
 
   // A provider without a chosen model still opens the chat, so /model can pick one.
@@ -114,6 +133,62 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
     box.print(toolLine(name, call?.input, result));
   });
   const sync = SessionSync.attach(session, { origin: 'terminal' });
+
+  /** One turn with the chat's output: the prompt, tool lines, the answer and the footer. */
+  async function runTurn(text: string, origin: PromptOrigin, images: ImageInput[] = []): Promise<void> {
+    const attached = images.length ? ` [${images.length} image${images.length === 1 ? '' : 's'}]` : '';
+    const source = origin === 'remote' ? `\n${' '.repeat(CONTENT_INDENT)}${style.gray('from /code')}` : '';
+    box.print(`${userMessage(`${text}${attached}`)}${source}\n`);
+    if (!session.modelId) {
+      box.print(`${' '.repeat(CONTENT_INDENT)}${style.yellow('Choose a model first:')} ${style.accent('/models')}\n`);
+      return;
+    }
+
+    const startedAt = Date.now();
+    toolsRan = 0;
+    box.setBusy(true);
+    try {
+      const { reply } = await session.send(text, origin, images);
+      box.setBusy(false);
+      if (reply.trim()) {
+        box.print(`${toolsRan ? '\n' : ''}${assistantMessage(reply.trim())}`);
+      }
+      box.print(`\n${turnFooter(modeLabel(permissionMode), session.modelId, Date.now() - startedAt)}\n`);
+    } catch (error) {
+      box.setBusy(false);
+      const message =
+        error instanceof TurnInterruptedError ? 'Interrupted' : error instanceof Error ? error.message : String(error);
+      box.print(`${' '.repeat(CONTENT_INDENT)}${style.red(message)}`);
+      box.print(`\n${turnFooter(modeLabel(permissionMode), session.modelId, Date.now() - startedAt, true)}\n`);
+    } finally {
+      pendingTools.length = 0;
+    }
+  }
+
+  /** `/remote-control [name]`: share this chat with /code, or stop sharing it. */
+  async function toggleRemote(name?: string): Promise<void> {
+    if (remote?.active) {
+      remote.stop();
+      box.print(`${' '.repeat(CONTENT_INDENT)}${style.gray('Remote Control disconnected.')}`);
+      box.refresh();
+      return;
+    }
+    const auth = readAuth();
+    if (!auth) {
+      const hint = `${style.yellow('Sign in to aiolah first:')} ${style.accent('/connect aiolah')}`;
+      box.print(`${' '.repeat(CONTENT_INDENT)}${hint}`);
+      return;
+    }
+    remote ??= new ChatRemote(session, sync, {
+      runTurn: (text, images) => void runTurn(text, 'remote', images),
+      notice: (line) => box.setNotice(style.gray(line)),
+      modelChanged: () => box.refresh(),
+      interrupted: () => box.cancelConfirm(),
+    });
+    const deviceName = name?.trim() || `${hostname()} · ${basename(workspaceRoot) || workspaceRoot}`;
+    box.print(`${' '.repeat(CONTENT_INDENT)}${style.green(await remote.start(auth, deviceName))}`);
+    box.refresh();
+  }
 
   if (box.enhanced) {
     box.showHome();
@@ -155,48 +230,40 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
           },
           suspend: () => box.unmount(),
           clearScreen: () => box.clearScreen(),
+          remoteControl: toggleRemote,
         });
         if (result === 'exit') break;
         box.print('');
         continue;
       }
 
-      box.print(`${userMessage(line)}\n`);
-      if (!session.modelId) {
-        box.print(`${' '.repeat(CONTENT_INDENT)}${style.yellow('Choose a model first:')} ${style.accent('/models')}\n`);
-        continue;
-      }
-
-      const startedAt = Date.now();
-      toolsRan = 0;
-      box.setBusy(true);
-      try {
-        const { reply } = await session.send(line);
-        box.setBusy(false);
-        if (reply.trim()) {
-          box.print(`${toolsRan ? '\n' : ''}${assistantMessage(reply.trim())}`);
-        }
-        box.print(`\n${turnFooter(modeLabel(permissionMode), session.modelId, Date.now() - startedAt)}\n`);
-      } catch (error) {
-        box.setBusy(false);
-        const message =
-          error instanceof TurnInterruptedError
-            ? 'Interrupted'
-            : error instanceof Error
-              ? error.message
-              : String(error);
-        box.print(`${' '.repeat(CONTENT_INDENT)}${style.red(message)}`);
-        box.print(`\n${turnFooter(modeLabel(permissionMode), session.modelId, Date.now() - startedAt, true)}\n`);
-      } finally {
-        pendingTools.length = 0;
-      }
+      // A prompt from /code may still be running; this one waits for it.
+      await waitUntilIdle(session);
+      await runTurn(line, 'terminal');
     }
   } finally {
     box.setBusy(false);
     box.unmount();
     rl.close();
+    remote?.stop();
     await Promise.all([sync?.flush(), mcp.close()]);
   }
+}
+
+/** Resolves once the session has no running turn. */
+function waitUntilIdle(session: ChatSession): Promise<void> {
+  if (!session.isRunning) {
+    return Promise.resolve();
+  }
+  return new Promise((resolveIdle) => {
+    const done = () => {
+      session.off('turn_end', done);
+      session.off('turn_error', done);
+      resolveIdle();
+    };
+    session.on('turn_end', done);
+    session.on('turn_error', done);
+  });
 }
 
 function modeLabel(mode: PermissionMode): string {
