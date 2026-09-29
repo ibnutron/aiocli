@@ -160,7 +160,7 @@ program
 program
   .command('uninstall')
   .description('Sign out, delete ~/.aiolah and remove the npm package')
-  .option('--keep-config', 'keep login, provider keys and device id (~/.aiolah/*.json, machine-id)')
+  .option('--keep-config', 'keep login, provider keys, device id and trusted folders (~/.aiolah/*.json, machine-id)')
   .option('--keep-data', 'keep saved sessions (~/.aiolah/sessions)')
   .option('--dry-run', 'only show what would be removed')
   .option('-f, --force', 'do not ask for confirmation')

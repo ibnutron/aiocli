@@ -11,6 +11,7 @@ import { SessionSync } from '../sessionSync.js';
 import { generateNonce, verifyChallenge } from '../auth.js';
 import { apiRequest, machineIdFor, readAuth, relayHostUrl, serverUrl, type StoredAuth } from '../config.js';
 import { findLatestSession } from '../persistence.js';
+import { ensureTrusted } from '../trust.js';
 import { ask } from '../prompt.js';
 import { listProviderModels, providerDef, resolveSelection } from '../providers.js';
 import { fetchModels } from '../models.js';
@@ -103,6 +104,12 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
       'Not logged in. Run `aiolah auth login` to control this machine from aiolah, ' +
         'or pass --port to accept direct connections with AIOLAH_REMOTE_TOKEN.',
     );
+  }
+
+  // Before the device is registered, so an untrusted folder never shows up on /code.
+  if (!(await ensureTrusted(workspaceRoot))) {
+    process.exitCode = 1;
+    return;
   }
 
   const selection = await resolveSelection(options);

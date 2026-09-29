@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { ChatSession, TurnInterruptedError } from '../session.js';
 import { SessionSync } from '../sessionSync.js';
 import { findLatestSession } from '../persistence.js';
+import { ensureTrusted } from '../trust.js';
 import { handleSlash } from '../slash.js';
 import { providerDef, resolveProvider, resolveProviderModel } from '../providers.js';
 import { packageVersion } from '../version.js';
@@ -26,8 +27,13 @@ interface ChatOptions extends PermissionOptions {
 }
 
 export async function chatCommand(options: ChatOptions): Promise<void> {
-  const rl = readline.createInterface({ input: stdin, output: stdout });
   const workspaceRoot = resolve(options.workspace);
+  // Asked before readline takes over stdin, and before any tool can run here.
+  if (!(await ensureTrusted(workspaceRoot))) {
+    process.exitCode = 1;
+    return;
+  }
+  const rl = readline.createInterface({ input: stdin, output: stdout });
 
   const resumeId = options.resume ?? (options.continue ? findLatestSession()?.id : undefined);
 

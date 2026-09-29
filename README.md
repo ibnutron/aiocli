@@ -197,6 +197,17 @@ Choose how much the agent may do without asking with `--permission-mode`
 | `acceptEdits` | File changes are allowed; shell commands still ask. |
 | `bypassPermissions` | Never asks. Same as `--dangerously-skip-permissions` — only for sandboxes or throwaway machines. |
 
+### Trusting a folder
+
+The first time you run `aiolah` (chat, `rc` or `serve`) in a folder, it asks
+**Do you trust the files in this folder?** before anything can read, edit or
+run there. **Yes** remembers the folder, and every folder inside it, in
+`~/.aiolah/trusted.json`; **No** (or Esc) exits without opening it, and `rc`
+does not register the device. Your home folder and filesystem roots are never
+remembered, so you are asked there every time. Without a terminal (`aiolah -p`,
+`aiolah run`, piped input, CI) nothing is asked. To forget a folder, remove it
+from `~/.aiolah/trusted.json`.
+
 ## Command reference
 
 Every command accepts `-h, --help`; `aiolah -v` prints the version.
@@ -264,7 +275,8 @@ Empty values count as unset.
   above); run `aiolah auth logout` to keep it local only.
 - **Local history.** Full sessions (conversation, tool calls, file contents) are
   saved as plain JSON in `~/.aiolah/sessions/` on the machine running the agent.
-  Your login token is in `~/.aiolah/auth.json` (mode 0600).
+  Your login token is in `~/.aiolah/auth.json` (mode 0600). Folders you trusted are listed
+  in `~/.aiolah/trusted.json`.
 - **The relay keeps nothing.** Remote-control messages pass through the aiolah
   relay without being stored (the session sync above is a separate HTTPS call).
 
@@ -276,7 +288,7 @@ aiolah uninstall             # sign out, delete ~/.aiolah, npm uninstall -g @aio
 ```
 
 It revokes this machine's login token on aiolah, deletes your login, provider
-keys and device id (`--keep-config` keeps them) and saved sessions
+keys, device id and trusted folders (`--keep-config` keeps them) and saved sessions
 (`--keep-data` keeps them), then removes the package. `-f` skips the
 confirmation. Devices registered with `aiolah rc` stay on the Code page until
 you remove them there. Installed another way? `npm uninstall -g @aiolah/cli`
