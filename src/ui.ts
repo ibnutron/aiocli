@@ -187,9 +187,23 @@ export function toolLine(name: string, input: unknown, result: string): string {
       }
       return [`${title}${code === '0' ? '' : style.red(` · exit ${code}`)}`, ...preview].join('\n');
     }
-    default:
-      return `${indent}${style.gray('→')} ${name}${suffix}`;
+    default: {
+      const mcp = mcpParts(name);
+      if (!mcp) {
+        return `${indent}${style.gray('→')} ${name}${suffix}`;
+      }
+      const shownArgs = Object.keys(args).length ? ` ${style.gray(truncate(JSON.stringify(args), room / 2))}` : '';
+      const firstLine = result.trim().split('\n')[0] ?? '';
+      const preview = suffix || (firstLine ? style.gray(` · ${truncate(firstLine, room / 2)}`) : '');
+      return `${indent}${style.gray('→')} ${mcp.server} · ${mcp.tool} ${style.gray('(MCP)')}${shownArgs}${preview}`;
+    }
   }
+}
+
+/** `mcp__<server>__<tool>` → its parts, or null for a built-in tool. */
+function mcpParts(name: string): { server: string; tool: string } | null {
+  const match = /^mcp__(.+?)__(.+)$/.exec(name);
+  return match ? { server: match[1]!, tool: match[2]! } : null;
 }
 
 /** Short label of a running tool, for the status row under the input box. */
@@ -202,7 +216,8 @@ export function toolActivity(name: string, input: unknown): string {
     edit_file: `Editing ${String(args.path ?? '')}`,
     run_bash: `Running ${String(args.command ?? '')}`,
   };
-  return labels[name] ?? name;
+  const mcp = mcpParts(name);
+  return labels[name] ?? (mcp ? `Calling ${mcp.server} · ${mcp.tool}` : name);
 }
 
 /** "▣ Default · model · 3.2s" under a finished reply. */

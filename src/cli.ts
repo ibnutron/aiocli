@@ -16,6 +16,7 @@ import { uninstallCommand } from './commands/uninstall.js';
 import { runCommand } from './commands/run.js';
 import { upgradeCommand } from './commands/upgrade.js';
 import { doctorCommand } from './commands/doctor.js';
+import { collect, mcpAddCommand, mcpListCommand, mcpRemoveCommand, mcpResetCommand } from './commands/mcp.js';
 import { packageVersion } from './version.js';
 import { addPermissionOptions } from './permissions.js';
 
@@ -160,13 +161,52 @@ program
 program
   .command('uninstall')
   .description('Sign out, delete ~/.aiolah and remove the npm package')
-  .option('--keep-config', 'keep login, provider keys, device id and trusted folders (~/.aiolah/*.json, machine-id)')
+  .option(
+    '--keep-config',
+    'keep login, provider keys, device id, trusted folders and MCP servers (~/.aiolah/*.json, machine-id)',
+  )
   .option('--keep-data', 'keep saved sessions (~/.aiolah/sessions)')
   .option('--dry-run', 'only show what would be removed')
   .option('-f, --force', 'do not ask for confirmation')
   .action(uninstallCommand);
 
 program.command('doctor').description('Check installation, login and connectivity to aiolah').action(doctorCommand);
+
+// `aiolah mcp …`, like `claude mcp …`: servers whose tools the model can use.
+const mcp = program.command('mcp').description('Manage MCP servers (tools from other programs the model can use)');
+mcp
+  .command('list')
+  .description('List MCP servers for this folder and check that they start')
+  .option('-w, --workspace <dir>', 'project folder', '.')
+  .action(mcpListCommand);
+mcp
+  .command('add')
+  .description('Add a server: aiolah mcp add <name> -- <command> [args…], or aiolah mcp add -t http <name> <url>')
+  .argument('<name>', 'server name (letters, digits, - and _)')
+  .argument('<commandOrUrl>', 'command to start (stdio) or URL (http/sse)')
+  .argument('[args...]', 'arguments for the command (put -- before them)')
+  .option(
+    '-s, --scope <scope>',
+    'local (you, this folder), project (.mcp.json, shared) or user (you, everywhere)',
+    'local',
+  )
+  .option('-t, --transport <transport>', 'stdio, http or sse', 'stdio')
+  .option('-e, --env <KEY=value>', 'environment variable for a stdio server (repeatable)', collect)
+  .option('-H, --header <"Name: value">', 'HTTP header for an http/sse server (repeatable)', collect)
+  .option('-w, --workspace <dir>', 'project folder', '.')
+  .action(mcpAddCommand);
+mcp
+  .command('remove')
+  .description('Remove a server (from every scope unless --scope is given)')
+  .argument('<name>', 'server name')
+  .option('-s, --scope <scope>', 'local, project or user')
+  .option('-w, --workspace <dir>', 'project folder', '.')
+  .action(mcpRemoveCommand);
+mcp
+  .command('reset-project-choices')
+  .description("Forget which of this folder's .mcp.json servers you allowed or declined")
+  .option('-w, --workspace <dir>', 'project folder', '.')
+  .action(mcpResetCommand);
 
 const sessions = program.command('sessions').description('Manage saved chat sessions');
 sessions.command('list').description('List saved sessions').action(sessionsListCommand);

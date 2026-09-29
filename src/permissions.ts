@@ -1,13 +1,15 @@
 import { Option, type Command } from 'commander';
-import type { ConfirmFn } from './tools/index.js';
+import { staticVerdict, type AutoVerdict } from './autoMode.js';
 
 /**
  * Permission modes (same names as Claude Code's --permission-mode):
- * - default: ask before write_file, edit_file and run_bash;
- * - acceptEdits: file edits are allowed, shell commands still ask;
+ * - default: ask before write_file, edit_file, run_bash and MCP tools;
+ * - acceptEdits: file edits are allowed, shell commands and MCP tools still ask;
+ * - auto: file edits and read-only commands run, other shell commands and MCP
+ *   tools are reviewed by the model first and only asked about when risky;
  * - bypassPermissions: never ask (only for sandboxes / throwaway machines).
  */
-export const PERMISSION_MODES = ['default', 'acceptEdits', 'bypassPermissions'] as const;
+export const PERMISSION_MODES = ['default', 'acceptEdits', 'auto', 'bypassPermissions'] as const;
 
 export type PermissionMode = (typeof PERMISSION_MODES)[number];
 
@@ -43,17 +45,29 @@ export function nextPermissionMode(mode: PermissionMode): PermissionMode {
   return PERMISSION_MODES[(PERMISSION_MODES.indexOf(mode) + 1) % PERMISSION_MODES.length]!;
 }
 
+/** Asks the model whether an action may run (auto mode). */
+export type ReviewFn = (description: string, tool: string) => Promise<AutoVerdict>;
+
 /**
- * Wraps an interactive ask so the permission mode can answer first. Pass a
- * function to read the mode on every call (it can change mid-session).
+ * What the permission mode says about one action: `allow` runs it without
+ * asking; otherwise the user is asked with `ask` (the description, plus auto
+ * mode's reason when the reviewer wanted a human look).
  */
-export function applyPermissionMode(mode: PermissionMode | (() => PermissionMode), ask: ConfirmFn): ConfirmFn {
-  const currentMode = typeof mode === 'function' ? mode : () => mode;
-  return async (description, tool) => {
-    const active = currentMode();
-    if (active === 'bypassPermissions' || (active === 'acceptEdits' && EDIT_TOOLS.has(tool))) {
-      return true;
+export async function decidePermission(
+  mode: PermissionMode,
+  description: string,
+  tool: string,
+  review?: ReviewFn,
+): Promise<{ allow: true } | { allow: false; ask: string }> {
+  if (mode === 'bypassPermissions' || (mode === 'acceptEdits' && EDIT_TOOLS.has(tool))) {
+    return { allow: true };
+  }
+  if (mode === 'auto') {
+    const verdict = staticVerdict(description, tool) ?? (review ? await review(description, tool) : null);
+    if (verdict?.allow) {
+      return { allow: true };
     }
-    return ask(description, tool);
-  };
+    return { allow: false, ask: verdict ? `${description} — auto mode: ${verdict.reason}` : description };
+  }
+  return { allow: false, ask: description };
 }

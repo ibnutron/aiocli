@@ -1,8 +1,9 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { editFile, listDir, readFile, writeFile } from './fileTools.js';
 import { runBash } from './bashTool.js';
+import type { McpManager } from '../mcp/manager.js';
 
-/** Asks whether a mutating tool may run; `tool` is the tool name (write_file, edit_file, run_bash). */
+/** Asks whether a mutating tool may run; `tool` is the tool name (write_file, edit_file, run_bash, mcp__…). */
 export type ConfirmFn = (description: string, tool: string) => Promise<boolean>;
 
 export const TOOL_SCHEMAS: Anthropic.Tool[] = [
@@ -66,6 +67,8 @@ export interface ToolExecutionContext {
   confirm: ConfirmFn;
   /** Aborts a running shell command when the turn is interrupted. */
   signal?: AbortSignal;
+  /** Connected MCP servers; their tools are named mcp__<server>__<tool>. */
+  mcp?: McpManager;
 }
 
 export async function executeTool(
@@ -73,7 +76,7 @@ export async function executeTool(
   input: Record<string, unknown>,
   context: ToolExecutionContext,
 ): Promise<string> {
-  const { workspaceRoot, confirm, signal } = context;
+  const { workspaceRoot, confirm, signal, mcp } = context;
 
   switch (name) {
     case 'read_file':
@@ -109,7 +112,16 @@ export async function executeTool(
       return `exit code: ${result.exitCode}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
     }
 
-    default:
-      throw new Error(`Unknown tool: ${name}`);
+    default: {
+      if (!mcp?.owns(name)) {
+        throw new Error(`Unknown tool: ${name}`);
+      }
+      const args = JSON.stringify(input);
+      const shown = args.length > 200 ? `${args.slice(0, 199)}…` : args;
+      if (!(await confirm(`mcp: ${mcp.describe(name)} ${shown}`, name))) {
+        return 'User declined this action.';
+      }
+      return mcp.call(name, input, signal);
+    }
   }
 }

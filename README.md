@@ -19,7 +19,9 @@ npm install -g @aiolah/cli
 curl -fsSL https://aiolah.com/cli/install.sh | bash
 ```
 
-Check the installation any time with `aiolah doctor`.
+Check the installation any time with `aiolah doctor`, and the installed version
+with `aiolah --version` (`aiolah upgrade` updates it). Folder trust, MCP servers
+and auto mode need 0.1.3 or newer.
 
 ## Quick start
 
@@ -193,9 +195,39 @@ Choose how much the agent may do without asking with `--permission-mode`
 
 | Mode | Behaviour |
 |---|---|
-| `default` | Asks before every file change (`write_file`, `edit_file`) and every shell command (`run_bash`). |
-| `acceptEdits` | File changes are allowed; shell commands still ask. |
+| `default` | Asks before every file change (`write_file`, `edit_file`), shell command (`run_bash`) and MCP tool call. |
+| `acceptEdits` | File changes are allowed; shell commands and MCP tools still ask. |
+| `auto` | File changes and read-only commands run; other shell commands and MCP tools are checked by the model first and only asked about when they look risky (see below). |
 | `bypassPermissions` | Never asks. Same as `--dangerously-skip-permissions` — only for sandboxes or throwaway machines. |
+
+In chat, **Shift+Tab** cycles through the modes.
+
+### Auto mode
+
+`--permission-mode auto` (or Shift+Tab until the box says **Auto**) lets the
+agent work without stopping for every command, while still asking about the
+ones that matter:
+
+- **Runs without asking:** file changes inside the workspace, and read-only
+  commands such as `ls`, `cat`, `grep`, `git status`, `git diff` or `git log`.
+- **Always asks:** commands that are dangerous whatever the context — `sudo`,
+  deleting top-level folders, piping a download into a shell, force-pushing,
+  `git reset --hard`, publishing packages, wiping a database, connecting to
+  other machines, and similar.
+- **Everything else** (other shell commands and MCP tool calls) is first shown
+  to the session's model together with your latest request. Ordinary steps run
+  (builds, tests, installs, local commits); the rest comes back to you with the
+  reason — anything that pushes, deploys, uploads or touches secrets, and
+  anything that does not follow from what you asked (a sign of prompt injection
+  from file contents or tool output).
+
+When auto mode asks, the prompt shows why (`$ git push origin main — auto mode:
+pushes code to a remote repository`). If the check fails or times out it asks
+too; it never allows by default. In `aiolah -p` nobody can answer, so whatever
+auto mode would ask about is denied. With your aiolah login these checks are
+free: they do not use your plan's quota and are not logged as prompts (up to 30
+a minute). With your own provider key they are small extra requests to that
+provider.
 
 ### Trusting a folder
 
@@ -208,9 +240,47 @@ remembered, so you are asked there every time. Without a terminal (`aiolah -p`,
 `aiolah run`, piped input, CI) nothing is asked. To forget a folder, remove it
 from `~/.aiolah/trusted.json`.
 
+## MCP servers
+
+aiolah can use tools from [MCP](https://modelcontextprotocol.io) servers, in
+the same format as Claude Code, so an existing `.mcp.json` works unchanged.
+Their tools reach the model as `mcp__<server>__<tool>`, and **every call asks
+for Allow/Deny** — in auto mode only the calls the reviewer finds risky, and
+never with `--dangerously-skip-permissions` (`acceptEdits` only covers file
+edits).
+
+```bash
+aiolah mcp add boost -- php artisan boost:mcp                 # stdio (put -- before the command)
+aiolah mcp add -e GITHUB_TOKEN=… github -- npx -y @modelcontextprotocol/server-github
+aiolah mcp add -t http -H "Authorization: Bearer …" docs https://example.com/mcp
+aiolah mcp list                                               # status and tool count of each server
+aiolah mcp remove boost
+```
+
+| Scope (`-s`) | Stored in | Who uses it |
+|---|---|---|
+| `local` (default) | `~/.aiolah/mcp.json`, under this folder | only you, only in this folder |
+| `project` | `.mcp.json` in the folder (commit it) | everyone working in the repo |
+| `user` | `~/.aiolah/mcp.json` | you, in every folder |
+
+A name defined in several scopes resolves local → project → user.
+`${VAR}` and `${VAR:-default}` in commands, arguments, `env`, URLs and headers
+are filled from your environment, so a shared `.mcp.json` never has to contain
+tokens.
+
+Servers in a project's `.mcp.json` come from the repo, not from you. The first
+time aiolah (chat, `rc`, `serve`) starts in that folder it asks **New MCP server
+found in this project** for each one: use it, use it and every future server of
+this project, or continue without it (Esc decides next time). Without a
+terminal (`aiolah -p`, CI) only servers you already approved start.
+`aiolah mcp reset-project-choices` forgets the answers for a folder. In chat,
+`/mcp` shows which servers are connected and why one failed. Servers run in the
+workspace folder; their log output is kept out of the chat and shown when they
+fail to start. Only headers are supported for remote servers (no OAuth sign-in).
+
 ## Command reference
 
-Every command accepts `-h, --help`; `aiolah -v` prints the version.
+Every command accepts `-h, --help`.
 
 | Command | Description |
 |---|---|
@@ -226,6 +296,11 @@ Every command accepts `-h, --help`; `aiolah -v` prints the version.
 | `aiolah serve` | Same as `rc` when signed in; with `--port` it runs in direct mode (see below). |
 | `aiolah attach <address>` | Join a direct-mode `serve` session from another machine. |
 | `aiolah sessions list` | List saved sessions. |
+| `aiolah mcp list` | List MCP servers for this folder and check that they start. |
+| `aiolah mcp add <name> -- <command> [args…]` | Add a stdio MCP server (`-s local\|project\|user`, `-e KEY=value`); `-t http\|sse <name> <url>` with `-H "Name: value"` for a remote one. |
+| `aiolah mcp remove <name>` | Remove an MCP server (`-s <scope>` for one scope only). |
+| `aiolah mcp reset-project-choices` | Ask again about this folder's `.mcp.json` servers. |
+| `aiolah --version` | Print the installed version. Alias: `-v`. |
 | `aiolah doctor` | Check installation, login, server, models and relay. Exits 1 on failure. |
 | `aiolah upgrade [version]` | Update from npm (`--check` only reports). Alias: `update`. |
 | `aiolah uninstall` | Sign out, delete `~/.aiolah` and remove the npm package (`--keep-config`, `--keep-data`, `--dry-run`, `-f`). |
@@ -239,7 +314,7 @@ Session flags (chat, run, rc, serve):
 | `-w, --workspace <dir>` | Folder the agent may read and change (default: current folder). |
 | `-c, --continue` | Continue the most recently used session. |
 | `-r, --resume <id>` | Resume a saved session by id. |
-| `--permission-mode <mode>` | `default`, `acceptEdits` or `bypassPermissions`. |
+| `--permission-mode <mode>` | `default`, `acceptEdits`, `auto` or `bypassPermissions`. |
 | `--dangerously-skip-permissions` | Never ask. Only use it in a sandbox. |
 
 ## Environment variables
@@ -252,6 +327,8 @@ Session flags (chat, run, rc, serve):
 | `AIOLAH_SERVER` | aiolah server URL (default `https://aiolah.com`). Overrides the server saved at login. |
 | `AIOLAH_RELAY_URL` | Relay URL for remote control (default `<server>/cli-relay`). |
 | `AIOLAH_REMOTE_TOKEN` | Shared secret for direct mode (`serve --port` and `attach`). |
+| `MCP_TIMEOUT` | Milliseconds to wait for an MCP server to start (default 30000). |
+| `MCP_TOOL_TIMEOUT` | Milliseconds an MCP tool call may take (default 600000; progress updates reset it). |
 
 Exported variables win over a `.env` file next to the installed package.
 Empty values count as unset.
@@ -276,7 +353,11 @@ Empty values count as unset.
 - **Local history.** Full sessions (conversation, tool calls, file contents) are
   saved as plain JSON in `~/.aiolah/sessions/` on the machine running the agent.
   Your login token is in `~/.aiolah/auth.json` (mode 0600). Folders you trusted are listed
-  in `~/.aiolah/trusted.json`.
+  in `~/.aiolah/trusted.json`; your MCP servers and your answers about project
+  servers are in `~/.aiolah/mcp.json` and `~/.aiolah/mcp-approvals.json`.
+- **MCP servers get what the model sends them.** Tool arguments and results
+  pass between the model and your MCP servers; results are part of the
+  conversation (and of the synced session when signed in).
 - **The relay keeps nothing.** Remote-control messages pass through the aiolah
   relay without being stored (the session sync above is a separate HTTPS call).
 
@@ -288,7 +369,7 @@ aiolah uninstall             # sign out, delete ~/.aiolah, npm uninstall -g @aio
 ```
 
 It revokes this machine's login token on aiolah, deletes your login, provider
-keys, device id and trusted folders (`--keep-config` keeps them) and saved sessions
+keys, device id, trusted folders and MCP servers (`--keep-config` keeps them) and saved sessions
 (`--keep-data` keeps them), then removes the package. `-f` skips the
 confirmation. Devices registered with `aiolah rc` stay on the Code page until
 you remove them there. Installed another way? `npm uninstall -g @aiolah/cli`
@@ -297,6 +378,10 @@ and `rm -rf ~/.aiolah` do the same by hand.
 ## Troubleshooting
 
 - `aiolah doctor` checks everything and tells you what to fix.
+- `aiolah --version` shows the installed version; `aiolah upgrade` installs the
+  latest (`--check` only reports).
+- **Unknown command `mcp` or option `--permission-mode auto`** — your CLI is
+  older than 0.1.3; run `aiolah upgrade`.
 - **"Your plan quota is used up"** — the plan limit was reached; wait for the
   reset or upgrade your plan.
 - **429 / "Provider returned error" on a free model** — free models are often

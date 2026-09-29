@@ -8,7 +8,9 @@ type MessageParam = Anthropic.MessageParam;
 export interface ModelRequest {
   model: string;
   max_tokens: number;
-  tools: Anthropic.Tool[];
+  /** Omitted for plain questions (the auto-mode permission check). */
+  tools?: Anthropic.Tool[];
+  system?: string;
   messages: MessageParam[];
 }
 
@@ -137,7 +139,7 @@ function flattenText(content: unknown): string {
 
 /** Anthropic Messages request → OpenAI Chat Completions request (text, images, tool calls/results). */
 export function toOpenAiRequest(request: ModelRequest): Record<string, unknown> {
-  const messages: OpenAiMessage[] = [];
+  const messages: OpenAiMessage[] = request.system ? [{ role: 'system', content: request.system }] : [];
 
   for (const message of request.messages) {
     if (typeof message.content === 'string') {
@@ -186,10 +188,14 @@ export function toOpenAiRequest(request: ModelRequest): Record<string, unknown> 
     model: request.model,
     max_tokens: request.max_tokens,
     messages,
-    tools: request.tools.map((tool) => ({
-      type: 'function',
-      function: { name: tool.name, description: tool.description, parameters: tool.input_schema },
-    })),
+    ...(request.tools?.length
+      ? {
+          tools: request.tools.map((tool) => ({
+            type: 'function',
+            function: { name: tool.name, description: tool.description, parameters: tool.input_schema },
+          })),
+        }
+      : {}),
   };
 }
 

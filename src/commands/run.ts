@@ -4,7 +4,9 @@ import { ChatSession } from '../session.js';
 import { SessionSync } from '../sessionSync.js';
 import { findLatestSession } from '../persistence.js';
 import { resolveSelection } from '../providers.js';
-import { applyPermissionMode, resolvePermissionMode, type PermissionOptions } from '../permissions.js';
+import { resolvePermissionMode, type PermissionOptions } from '../permissions.js';
+import type { ConfirmFn } from '../tools/index.js';
+import { mcpSummary, startMcp } from '../mcp/index.js';
 
 const STDIN_GRACE_MS = 300;
 
@@ -41,18 +43,32 @@ export async function runCommand(promptParts: string[], options: RunOptions): Pr
     throw new Error('No prompt given. Usage: aiolah run "<prompt>" (or pipe input into it).');
   }
 
-  const confirm = applyPermissionMode(resolvePermissionMode(options), async (description, tool) => {
-    const hint = tool === 'run_bash' ? '--dangerously-skip-permissions' : '--permission-mode acceptEdits';
+  // Only reached when the permission mode wants a human answer, and nobody can give one here.
+  const confirm: ConfirmFn = async (description, tool) => {
+    const hint = description.includes(' — auto mode: ')
+      ? '--dangerously-skip-permissions'
+      : ['write_file', 'edit_file'].includes(tool)
+        ? '--permission-mode acceptEdits'
+        : '--permission-mode auto or --dangerously-skip-permissions';
     stderr.write(`[denied] ${description} — nobody can confirm in non-interactive mode; allow it with ${hint}\n`);
     return false;
-  });
+  };
 
   const resumeId = options.resume ?? (options.continue ? findLatestSession()?.id : undefined);
+  const workspaceRoot = resolve(options.workspace);
+  // Nobody can approve new project servers here: only approved ones start.
+  const mcp = await startMcp(workspaceRoot);
+  const mcpProblem = mcpSummary(mcp);
+  if (mcpProblem) {
+    stderr.write(`[mcp] ${mcpProblem.replace(' — see /mcp', '')}\n`);
+  }
   const session = new ChatSession({
     ...(await resolveSelection(options)),
-    workspaceRoot: resolve(options.workspace),
+    workspaceRoot,
     confirm,
+    permissionMode: resolvePermissionMode(options),
     resumeId,
+    mcp,
   });
 
   session.on('tool', ({ name, input }) => {
@@ -65,7 +81,7 @@ export async function runCommand(promptParts: string[], options: RunOptions): Pr
     ({ reply } = await session.send(prompt, 'script'));
   } finally {
     // Make sure the session reaches aiolah before the process exits.
-    await sync?.flush();
+    await Promise.all([sync?.flush(), mcp.close()]);
   }
 
   if (options.outputFormat === 'json') {

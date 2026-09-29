@@ -12,11 +12,13 @@ import { generateNonce, verifyChallenge } from '../auth.js';
 import { apiRequest, machineIdFor, readAuth, relayHostUrl, serverUrl, type StoredAuth } from '../config.js';
 import { findLatestSession } from '../persistence.js';
 import { ensureTrusted } from '../trust.js';
+import { mcpSummary, startMcp } from '../mcp/index.js';
 import { ask } from '../prompt.js';
 import { listProviderModels, providerDef, resolveSelection } from '../providers.js';
 import { fetchModels } from '../models.js';
 import { SESSION_SELECTOR, type ImageInput, type ModelOption, type RelayFrame, type WireMessage } from '../protocol.js';
-import { applyPermissionMode, resolvePermissionMode, type PermissionOptions } from '../permissions.js';
+import { resolvePermissionMode, type PermissionOptions } from '../permissions.js';
+import type { ConfirmFn } from '../tools/index.js';
 
 interface ServeOptions extends PermissionOptions {
   port?: string;
@@ -111,6 +113,11 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  const mcp = await startMcp(workspaceRoot);
+  const mcpProblem = mcpSummary(mcp);
+  if (mcpProblem) {
+    stdout.write(`${mcpProblem.replace('see /mcp', 'run "aiolah mcp list"')}\n`);
+  }
 
   const selection = await resolveSelection(options);
   const permissionMode = resolvePermissionMode(options);
@@ -123,30 +130,35 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
     const peers = new Set<Peer>();
 
     // Confirmation is answered by whoever responds first: a client of this
-    // session (`confirm_reply`) or the host operator typing y/n here.
-    const confirm = applyPermissionMode(
-      permissionMode,
-      (description: string) =>
-        new Promise<boolean>((resolveConfirm) => {
-          const id = randomBytes(6).toString('hex');
-          const timer = setTimeout(() => settle(false), CONFIRM_TIMEOUT_MS);
-          const settle = (allow: boolean) => {
-            if (!pendingConfirms.has(id)) {
-              return;
-            }
-            clearTimeout(timer);
-            pendingConfirms.delete(id);
-            resolveConfirm(allow);
-          };
-          pendingConfirms.set(id, settle);
-          broadcast(runtime, { type: 'confirm', id, description });
-          stdout.write(
-            `\n[confirm ${session.sessionId}] Allow ${description}? Type y or n here, or answer from a client.\n`,
-          );
-        }),
-    );
+    // session (`confirm_reply`) or the host operator typing y/n here. Only
+    // reached when the permission mode wants a human answer (see ChatSession).
+    const confirm: ConfirmFn = (description) =>
+      new Promise<boolean>((resolveConfirm) => {
+        const id = randomBytes(6).toString('hex');
+        const timer = setTimeout(() => settle(false), CONFIRM_TIMEOUT_MS);
+        const settle = (allow: boolean) => {
+          if (!pendingConfirms.has(id)) {
+            return;
+          }
+          clearTimeout(timer);
+          pendingConfirms.delete(id);
+          resolveConfirm(allow);
+        };
+        pendingConfirms.set(id, settle);
+        broadcast(runtime, { type: 'confirm', id, description });
+        stdout.write(
+          `\n[confirm ${session.sessionId}] Allow ${description}? Type y or n here, or answer from a client.\n`,
+        );
+      });
 
-    const session = new ChatSession({ ...selection, workspaceRoot, confirm, resumeId: sessionToResume });
+    const session = new ChatSession({
+      ...selection,
+      workspaceRoot,
+      confirm,
+      permissionMode,
+      resumeId: sessionToResume,
+      mcp,
+    });
     session.hostId = hostId;
     const runtime: SessionRuntime = {
       session,

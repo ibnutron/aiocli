@@ -5,12 +5,13 @@ import { ChatSession, TurnInterruptedError } from '../session.js';
 import { SessionSync } from '../sessionSync.js';
 import { findLatestSession } from '../persistence.js';
 import { ensureTrusted } from '../trust.js';
+import { mcpSummary, startMcp } from '../mcp/index.js';
 import { handleSlash } from '../slash.js';
 import { providerDef, resolveProvider, resolveProviderModel } from '../providers.js';
 import { packageVersion } from '../version.js';
 import { TerminalInput } from '../terminalInput.js';
+import type { ConfirmFn } from '../tools/index.js';
 import {
-  applyPermissionMode,
   nextPermissionMode,
   resolvePermissionMode,
   type PermissionMode,
@@ -33,6 +34,8 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  // Also before readline: new project servers are asked about in the same way.
+  const mcp = await startMcp(workspaceRoot);
   const rl = readline.createInterface({ input: stdin, output: stdout });
 
   const resumeId = options.resume ?? (options.continue ? findLatestSession()?.id : undefined);
@@ -60,24 +63,23 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
     }),
   );
 
-  const confirm = applyPermissionMode(
-    () => permissionMode,
-    async (description, tool) => {
-      if (alwaysAllowed.has(tool)) {
-        return true;
-      }
-      const answer = await box.confirm(
-        description
-          .replace(/^run_bash: /, '$ ')
-          .replace(/^write_file: /, 'Write ')
-          .replace(/^edit_file: /, 'Edit '),
-      );
-      if (answer === 'always') {
-        alwaysAllowed.add(tool);
-      }
-      return answer !== 'no';
-    },
-  );
+  // Only reached when the permission mode wants a human answer (see ChatSession).
+  const confirm: ConfirmFn = async (description, tool) => {
+    if (alwaysAllowed.has(tool)) {
+      return true;
+    }
+    const answer = await box.confirm(
+      description
+        .replace(/^run_bash: /, '$ ')
+        .replace(/^write_file: /, 'Write ')
+        .replace(/^edit_file: /, 'Edit ')
+        .replace(/^mcp: /, 'MCP '),
+    );
+    if (answer === 'always') {
+      alwaysAllowed.add(tool);
+    }
+    return answer !== 'no';
+  };
 
   // A provider without a chosen model still opens the chat, so /model can pick one.
   const provider = resolveProvider(options.provider);
@@ -88,7 +90,15 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
   } catch (error) {
     modelHint = error instanceof Error ? error.message : String(error);
   }
-  chat = new ChatSession({ provider, model, workspaceRoot, confirm, resumeId });
+  chat = new ChatSession({
+    provider,
+    model,
+    workspaceRoot,
+    confirm,
+    permissionMode: () => permissionMode,
+    resumeId,
+    mcp,
+  });
   const session = chat;
 
   const pendingTools: { name: string; input: unknown }[] = [];
@@ -113,8 +123,11 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
         `Type /help for commands, "exit" to quit.\n`,
     );
   }
+  const mcpProblem = mcpSummary(mcp);
   if (modelHint) {
     box.setNotice(style.yellow(modelHint));
+  } else if (mcpProblem) {
+    box.setNotice(style.yellow(mcpProblem));
   } else if (resumeId) {
     box.setNotice(style.gray(`Resumed session ${session.sessionId}`));
   }
@@ -133,6 +146,7 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
         const result = await handleSlash(line, {
           rl,
           session,
+          mcp,
           print: (text) => box.print(text),
           pick: (pickOptions) => box.pick(pickOptions),
           loading: (text) => {
@@ -181,7 +195,7 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
     box.setBusy(false);
     box.unmount();
     rl.close();
-    await sync?.flush();
+    await Promise.all([sync?.flush(), mcp.close()]);
   }
 }
 
@@ -189,6 +203,8 @@ function modeLabel(mode: PermissionMode): string {
   switch (mode) {
     case 'acceptEdits':
       return style.yellow('Accept edits');
+    case 'auto':
+      return style.green('Auto');
     case 'bypassPermissions':
       return style.red('Bypass');
     default:

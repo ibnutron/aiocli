@@ -17,8 +17,8 @@ interface UninstallOptions {
 }
 
 const CONFIG_DIR = join(homedir(), '.aiolah');
-/** Login, provider keys, this machine's device id and the folders you trusted. */
-const CONFIG_FILES = ['auth.json', 'providers.json', 'machine-id', 'trusted.json'];
+/** Login, provider keys, this machine's device id, the folders you trusted and your MCP servers. */
+const CONFIG_FILES = ['auth.json', 'providers.json', 'machine-id', 'trusted.json', 'mcp.json', 'mcp-approvals.json'];
 /** Saved conversations. */
 const DATA_DIRS = ['sessions'];
 

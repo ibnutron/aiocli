@@ -15,6 +15,7 @@ import {
 } from './providers.js';
 import { connectFlow, disconnectCommand } from './commands/connect.js';
 import { style, tildify } from './ui.js';
+import { formatMcpStatus, type McpManager } from './mcp/index.js';
 
 export interface SlashCommand {
   name: string;
@@ -30,6 +31,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: 'connect', args: '[provider]', description: 'Connect aiolah or your own provider key' },
   { name: 'disconnect', args: '<provider>', description: "Remove a provider's key (or sign out of aiolah)" },
   { name: 'status', description: 'Show provider, model, session and login' },
+  { name: 'mcp', description: 'Show MCP servers and their tools' },
   { name: 'sessions', description: 'List saved sessions (resume with: aiolah -r <id>)' },
   { name: 'clear', description: 'Clear the screen' },
   { name: 'help', description: 'Show commands and shortcuts' },
@@ -47,6 +49,8 @@ export function matchSlashCommands(prefix: string): SlashCommand[] {
 export interface SlashContext {
   rl: Interface;
   session: ChatSession;
+  /** MCP servers of this chat. */
+  mcp?: McpManager;
   /** Prints lines above the input box. */
   print: (text: string) => void;
   /** Dialog inside the input box; resolves to the picked value or null. */
@@ -183,6 +187,10 @@ export async function handleSlash(line: string, context: SlashContext): Promise<
         );
         return 'handled';
       }
+
+      case 'mcp':
+        print(formatMcpStatus(context.mcp?.status ?? []));
+        return 'handled';
 
       default:
         print(style.yellow(`  Unknown command /${typed}. Type /help.`));

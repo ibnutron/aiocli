@@ -5,6 +5,9 @@ import { generateSessionId, loadSession, saveSession, type SessionRecord } from 
 import { createModelClient, type ModelClient } from './modelClient.js';
 import { packageVersion } from './version.js';
 import type { HistoryItem, ImageInput } from './protocol.js';
+import type { McpManager } from './mcp/manager.js';
+import { reviewWithModel, type AutoVerdict } from './autoMode.js';
+import { decidePermission, type PermissionMode } from './permissions.js';
 
 type MessageParam = Anthropic.MessageParam;
 
@@ -34,8 +37,13 @@ export interface ChatSessionOptions {
   provider: string;
   model: string;
   workspaceRoot: string;
+  /** Asks the user (terminal, remote client) — only called when the permission mode doesn't decide. */
   confirm: ConfirmFn;
+  /** Permission mode, read on every action (chat can switch it mid-session). Default: `default`. */
+  permissionMode?: PermissionMode | (() => PermissionMode);
   resumeId?: string;
+  /** MCP servers whose tools are offered next to the built-in ones. */
+  mcp?: McpManager;
 }
 
 /**
@@ -57,22 +65,32 @@ export class ChatSession extends EventEmitter {
   private model: string;
   private readonly workspaceRoot: string;
   private readonly confirm: ConfirmFn;
+  private readonly mcp?: McpManager;
   private readonly id: string;
   private readonly createdAt: string;
   private history: MessageParam[];
   private abortController: AbortController | null = null;
+  /** aiolah context headers of the running turn (reused by auto-mode reviews). */
+  private turnHeaders: Record<string, string> | undefined;
 
   constructor(options: ChatSessionOptions) {
     super();
     this.client = createModelClient(options.provider);
     this.model = options.model;
     this.workspaceRoot = options.workspaceRoot;
+    this.mcp = options.mcp;
+    const mode = options.permissionMode;
+    const currentMode = typeof mode === 'function' ? mode : () => mode ?? 'default';
     this.confirm = async (description, tool) => {
-      this.emit('confirm_wait', { description, tool });
+      const decision = await decidePermission(currentMode(), description, tool, (action) => this.reviewAction(action));
+      if (decision.allow) {
+        return true;
+      }
+      this.emit('confirm_wait', { description: decision.ask, tool });
       try {
-        return await options.confirm(description, tool);
+        return await options.confirm(decision.ask, tool);
       } finally {
-        this.emit('confirm_done', { description, tool });
+        this.emit('confirm_done', { description: decision.ask, tool });
       }
     };
 
@@ -235,21 +253,21 @@ export class ChatSession extends EventEmitter {
     });
 
     // Context for aiolah's prompt log; never sent to Anthropic directly.
-    const headers = this.client.viaAiolah
+    const headers = (this.turnHeaders = this.client.viaAiolah
       ? {
           'X-Aiolah-Session': this.id,
           'X-Aiolah-Origin': origin,
           'X-Aiolah-Version': packageVersion(),
           ...(this.hostId ? { 'X-Aiolah-Host': String(this.hostId) } : {}),
         }
-      : undefined;
+      : undefined);
 
     while (true) {
       const response = await this.client.create(
         {
           model: this.model,
           max_tokens: 4096,
-          tools: TOOL_SCHEMAS,
+          tools: this.mcp ? [...TOOL_SCHEMAS, ...this.mcp.toolSchemas] : TOOL_SCHEMAS,
           messages: this.history,
         },
         headers,
@@ -284,6 +302,7 @@ export class ChatSession extends EventEmitter {
             workspaceRoot: this.workspaceRoot,
             confirm: this.confirm,
             signal,
+            mcp: this.mcp,
           });
         } catch (error) {
           content = `Error: ${error instanceof Error ? error.message : String(error)}`;
@@ -299,6 +318,38 @@ export class ChatSession extends EventEmitter {
       this.persist();
       signal.throwIfAborted();
     }
+  }
+
+  /** Auto mode: asks the session's model whether `action` may run without the user. */
+  private reviewAction(action: string): Promise<AutoVerdict> {
+    return reviewWithModel(
+      this.client,
+      this.model,
+      { action, userRequest: this.latestUserRequest(), workspace: this.workspaceRoot },
+      this.turnHeaders,
+      this.abortController?.signal,
+    );
+  }
+
+  /** Text of the user's most recent message (not tool results). */
+  private latestUserRequest(): string {
+    for (let index = this.history.length - 1; index >= 0; index -= 1) {
+      const message = this.history[index]!;
+      if (message.role !== 'user') {
+        continue;
+      }
+      if (typeof message.content === 'string') {
+        return message.content;
+      }
+      const text = message.content
+        .filter((block): block is Anthropic.TextBlockParam => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n');
+      if (text.trim()) {
+        return text;
+      }
+    }
+    return '';
   }
 
   private persist(): void {
