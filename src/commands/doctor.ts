@@ -2,6 +2,7 @@ import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { stdout } from 'node:process';
+import { expiryLabel, loginNotice } from '../loginStatus.js';
 import { apiRequest, readAuth, relayHostUrl, serverUrl } from '../config.js';
 import { activeSelection, isConnected, providerDef, resolveProvider } from '../providers.js';
 import { compareVersions, fetchRegistryInfo, isNpmInstall, packageRoot, packageVersion } from '../version.js';
@@ -77,7 +78,9 @@ export async function doctorCommand(): Promise<void> {
     report(
       process.platform === 'win32' || mode === 0o600 ? 'ok' : 'warn',
       'Credentials',
-      `${authFile}${process.platform === 'win32' || mode === 0o600 ? '' : ` has mode ${mode.toString(8)} — run "chmod 600 ${authFile}"`}`,
+      process.platform === 'win32' || mode === 0o600
+        ? authFile
+        : `${authFile} has mode ${mode.toString(8)} — run "chmod 600 ${authFile}"`,
     );
   }
 
@@ -90,9 +93,20 @@ export async function doctorCommand(): Promise<void> {
 
   if (auth) {
     try {
-      const me = await apiRequest<{ user?: { email: string } }>(server, '/api/v1/app/cli/me', { token: auth.token });
+      const me = await apiRequest<{ user?: { email: string }; expires_at?: string | null }>(
+        server,
+        '/api/v1/app/cli/me',
+        { token: auth.token },
+      );
       if (me.status === 200 && me.data.user) {
-        report('ok', 'Login', `signed in as ${me.data.user.email}`);
+        const state = {
+          valid: true,
+          expiresAt: me.data.expires_at ? new Date(me.data.expires_at) : null,
+          kind: auth.kind ?? 'login',
+        } as const;
+        const warning = loginNotice(state);
+        const detail = `signed in as ${me.data.user.email}, ${warning ?? expiryLabel(state)}`;
+        report(warning ? 'warn' : 'ok', 'Login', detail);
         const models = await apiRequest<{ default: string | null; data: unknown[] }>(server, '/api/cli/models', {
           token: auth.token,
         });
@@ -106,7 +120,13 @@ export async function doctorCommand(): Promise<void> {
           );
         }
       } else {
-        report('fail', 'Login', `token rejected (HTTP ${me.status}) — run "aiolah auth login"`);
+        report(
+          'fail',
+          'Login',
+          me.status === 401
+            ? `expired or revoked — run "aiolah ${auth.kind === 'setup-token' ? 'setup-token' : 'auth login'}"`
+            : `token rejected (HTTP ${me.status}) — run "aiolah auth login"`,
+        );
       }
     } catch (error) {
       report('fail', 'Login', `could not verify (${message(error)})`);

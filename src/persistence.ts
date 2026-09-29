@@ -35,7 +35,14 @@ export function saveSession(record: SessionRecord): void {
 }
 
 export function loadSession(id: string): SessionRecord {
-  return JSON.parse(readFileSync(pathFor(id), 'utf8')) as SessionRecord;
+  try {
+    return JSON.parse(readFileSync(pathFor(id), 'utf8')) as SessionRecord;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(`No saved session "${id}". List them with: aiolah sessions list`);
+    }
+    throw error;
+  }
 }
 
 export function listSessions(): SessionRecord[] {

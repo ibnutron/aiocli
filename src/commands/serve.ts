@@ -246,7 +246,8 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
         return runtime;
       }
       stdout.write(
-        `\nremote [${runtime.session.sessionId}]> ${message.text}${images.length ? ` [${images.length} image(s)]` : ''}\n`,
+        `\nremote [${runtime.session.sessionId}]> ${message.text}` +
+          `${images.length ? ` [${images.length} image(s)]` : ''}\n`,
       );
       broadcast(runtime, { type: 'user', text: message.text, imageCount: images.length || undefined }, peer);
       void runTurn(runtime, message.text, 'remote', images);

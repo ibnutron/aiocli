@@ -123,7 +123,9 @@ export function assistantMessage(text: string): string {
       continue;
     }
     if (/^\s*>\s?/.test(line)) {
-      rows.push(...wrapText(line.replace(/^\s*>\s?/, ''), width - 2).map((row) => style.gray('│ ') + style.italic(inline(row))));
+      rows.push(
+        ...wrapText(line.replace(/^\s*>\s?/, ''), width - 2).map((row) => style.gray('│ ') + style.italic(inline(row))),
+      );
       continue;
     }
     rows.push(...wrapText(line.replace(/^(\s*)[-*]\s+/, '$1• '), width).map(inline));
@@ -163,7 +165,9 @@ export function toolLine(name: string, input: unknown, result: string): string {
     case 'read_file':
       return `${indent}${style.gray('→')} Read ${style.gray(path)}${suffix || style.gray(` · ${count(result)} lines`)}`;
     case 'list_dir':
-      return `${indent}${style.gray('→')} List ${style.gray(path)}${suffix || style.gray(` · ${count(result)} entries`)}`;
+      return `${indent}${style.gray('→')} List ${style.gray(path)}${
+        suffix || style.gray(` · ${count(result)} entries`)
+      }`;
     case 'write_file':
       return `${indent}${style.gray('←')} Write ${style.gray(path)}${
         suffix || style.gray(` · ${count(String(args.content ?? ''))} lines`)
@@ -171,7 +175,8 @@ export function toolLine(name: string, input: unknown, result: string): string {
     case 'edit_file':
       return `${indent}${style.gray('←')} Edit ${style.gray(path)}${
         suffix ||
-        ` ${style.green(`+${count(String(args.new_string ?? ''))}`)} ${style.red(`-${count(String(args.old_string ?? ''))}`)}`
+        ` ${style.green(`+${count(String(args.new_string ?? ''))}`)} ` +
+          style.red(`-${count(String(args.old_string ?? ''))}`)
       }`;
     case 'run_bash': {
       const title = `${indent}${style.gray('$')} ${truncate(String(args.command ?? ''), room)}`;
@@ -239,8 +244,7 @@ const GLYPHS: Record<string, string[]> = {
 
 /** "aiolah" wordmark: "aio" dimmed, "lah" bright, like opencode's open/code. */
 export function wordmark(): { lines: string[]; width: number } {
-  const render = (word: string) =>
-    [0, 1, 2, 3].map((row) => [...word].map((letter) => GLYPHS[letter]![row]).join(' '));
+  const render = (word: string) => [0, 1, 2, 3].map((row) => [...word].map((letter) => GLYPHS[letter]![row]).join(' '));
   const left = render('aio');
   const right = render('lah');
   return {
@@ -255,7 +259,12 @@ export function gitBranch(dir: string): string | null {
     try {
       let gitDir = join(current, '.git');
       if (statSync(gitDir).isFile()) {
-        gitDir = resolve(current, readFileSync(gitDir, 'utf8').replace(/^gitdir:\s*/, '').trim());
+        gitDir = resolve(
+          current,
+          readFileSync(gitDir, 'utf8')
+            .replace(/^gitdir:\s*/, '')
+            .trim(),
+        );
       }
       const head = readFileSync(join(gitDir, 'HEAD'), 'utf8').trim();
       return head.startsWith('ref: refs/heads/') ? head.slice('ref: refs/heads/'.length) : head.slice(0, 7);
@@ -279,9 +288,7 @@ export function scanner(frame: number, width = 8): string {
   for (let index = 0; index < width; index += 1) {
     const distance = (index - head) * direction;
     bar +=
-      distance >= 0 && distance < SCANNER_COLORS.length
-        ? style.fg(SCANNER_COLORS[distance]!, '■')
-        : style.fg(238, '-');
+      distance >= 0 && distance < SCANNER_COLORS.length ? style.fg(SCANNER_COLORS[distance]!, '■') : style.fg(238, '-');
   }
   return bar;
 }
@@ -297,7 +304,7 @@ export function wrapAnsi(line: string, width: number): string[] {
   let current = '';
   let active = '';
   let count = 0;
-  for (let index = 0; index < line.length; ) {
+  for (let index = 0; index < line.length;) {
     escape.lastIndex = index;
     const match = escape.exec(line);
     if (match) {

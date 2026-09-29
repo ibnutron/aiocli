@@ -33,7 +33,24 @@ aiolah                # interactive chat in this folder
 
 `aiolah auth login` prints a code and opens the approval page; after you click
 Approve the terminal signs in by itself. `aiolah auth status` shows who is
-signed in, `aiolah auth logout` signs out and revokes this machine's token.
+signed in and until when, `aiolah auth logout` signs out and revokes this
+machine's token.
+
+**Your login expires, as in Claude Code.** It stays valid while you use it —
+each use extends it to 30 days — but never longer than 90 days after you
+signed in. Three days before it ends, aiolah warns at startup (`Your login
+expires in 3 days · run aiolah auth login to renew`); once it has expired,
+model requests fail with `Login expired · Please run aiolah auth login`, and
+`/status` shows `Expired — log in again`. A remote-control device stops working
+at that point too, so renew early on machines you control remotely. (The
+aiolah server sets these durations and may change them.)
+
+For CI and scripts, `aiolah setup-token` runs the same approval and prints a
+**long-lived token** (one year) instead of saving it. Set it as `AIOLAH_TOKEN`
+where you need it; it can only make model requests, not remote control.
+
+When you leave `aiolah chat`, it prints how to come back to the same
+conversation: `aiolah --resume <session-id>` (or `aiolah -c` for the latest).
 
 ## Usage
 
@@ -298,6 +315,7 @@ Every command accepts `-h, --help`.
 | `aiolah auth login` | Sign in through your browser (`--server <url>`, `--no-browser`). Shortcut: `aiolah login`. |
 | `aiolah auth status` | Show the signed-in account and which credentials model calls use. Alias: `auth list`. |
 | `aiolah auth logout` | Sign out and revoke this machine's token. Shortcut: `aiolah logout`. |
+| `aiolah setup-token` | Print a one-year token for CI and scripts (use it as `AIOLAH_TOKEN`; model requests only). |
 | `aiolah models` | List the coding models your plan can use (`--provider <id>` for a connected provider). |
 | `aiolah connect [provider]` | Save your own API key for a provider (see Providers). |
 | `aiolah disconnect <provider>` | Remove a saved provider key. |
@@ -335,6 +353,7 @@ Session flags (chat, run, rc, serve):
 | `ANTHROPIC_API_KEY` | Call Anthropic directly with your own key instead of your aiolah plan (default model `claude-sonnet-5`). |
 | Provider keys (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `OPENCODE_API_KEY`, `GEMINI_API_KEY`, `ZHIPU_API_KEY`, … — see the table under Providers) | Used for that provider when no key is saved with `aiolah connect`. |
 | `AZURE_RESOURCE_NAME`, `CLOUDFLARE_ACCOUNT_ID`, `SNOWFLAKE_ACCOUNT` | Fill in the provider's URL when you do not type it on connect. |
+| `AIOLAH_TOKEN` | A token from `aiolah setup-token`; used instead of the saved login (model requests only). |
 | `AIOLAH_SERVER` | aiolah server URL (default `https://aiolah.com`). Overrides the server saved at login. |
 | `AIOLAH_RELAY_URL` | Relay URL for remote control (default `<server>/cli-relay`). |
 | `AIOLAH_REMOTE_TOKEN` | Shared secret for direct mode (`serve --port` and `attach`). |
@@ -398,6 +417,8 @@ and `rm -rf ~/.aiolah` do the same by hand.
 - **429 / "Provider returned error" on a free model** — free models are often
   busy; try again or pick another model from `aiolah models`.
 - **"Not logged in"** — run `aiolah auth login`, or set `ANTHROPIC_API_KEY`.
+- **"Login expired · Please run aiolah auth login"** — the login was unused for
+  30 days or is older than 90 days; sign in again.
 
 ## Advanced
 

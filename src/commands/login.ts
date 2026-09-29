@@ -4,6 +4,7 @@ import { stdout } from 'node:process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { apiRequest, clearAuth, readAuth, serverUrl, writeAuth } from '../config.js';
 import { PROVIDERS, activeSelection, isConnected, resolveProvider } from '../providers.js';
+import { checkLogin, expiryLabel } from '../loginStatus.js';
 
 interface LoginOptions {
   server?: string;
@@ -21,9 +22,13 @@ interface DeviceCodeResponse {
 
 interface TokenResponse {
   token?: string;
+  kind?: 'login' | 'setup-token';
+  expires_at?: string | null;
   user?: { name: string; email: string };
   error?: string;
 }
+
+type ApprovedToken = Required<Pick<TokenResponse, 'token' | 'user'>> & TokenResponse;
 
 /**
  * Device authorization flow: print a code, the user approves it in a browser
@@ -32,10 +37,38 @@ interface TokenResponse {
  */
 export async function loginCommand(options: LoginOptions): Promise<void> {
   const server = (options.server ?? serverUrl(null)).replace(/\/+$/, '');
+  const approved = await deviceFlow(server, 'login', options.browser !== false);
+  writeAuth({ server, token: approved.token, user: approved.user, expiresAt: approved.expires_at ?? null });
+  stdout.write(`\nLogged in as ${approved.user.name} <${approved.user.email}> on ${server}.\n`);
+}
 
+/**
+ * `aiolah setup-token` (like `claude setup-token`): the same browser approval,
+ * but the result is a long-lived token for CI and scripts. It is printed, not
+ * saved; set it as AIOLAH_TOKEN where you want to use it. It can only make
+ * model requests (no remote control, devices or session sync).
+ */
+export async function setupTokenCommand(options: LoginOptions): Promise<void> {
+  const server = (options.server ?? serverUrl(null)).replace(/\/+$/, '');
+  const approved = await deviceFlow(server, 'setup-token', options.browser !== false);
+  const until = approved.expires_at ? ` It is valid until ${new Date(approved.expires_at).toUTCString()}.` : '';
+  stdout.write(
+    `\nLong-lived token for ${approved.user.email} on ${server}:\n\n  ${approved.token}\n\n` +
+      `It is not saved anywhere. Set it as AIOLAH_TOKEN where you want to use it, e.g.\n` +
+      `  export AIOLAH_TOKEN=<token>        (macOS, Linux, WSL)\n` +
+      `  $env:AIOLAH_TOKEN = "<token>"      (PowerShell)\n` +
+      `It can only make model requests (no remote control).${until}\n`,
+  );
+}
+
+async function deviceFlow(
+  server: string,
+  kind: 'login' | 'setup-token',
+  openInBrowser: boolean,
+): Promise<ApprovedToken> {
   const start = await apiRequest<DeviceCodeResponse>(server, '/api/v1/app/cli/device-codes', {
     method: 'POST',
-    body: { machine_name: hostname() },
+    body: { machine_name: hostname(), kind },
   });
   if (start.status !== 200) {
     throw new Error(`Could not start login on ${server} (HTTP ${start.status}).`);
@@ -46,7 +79,7 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
     `\nTo sign in, open:\n\n  ${codes.verification_uri_complete}\n\n` +
       `and confirm this code: ${codes.user_code}\n\nWaiting for approval… (Ctrl+C to cancel)\n`,
   );
-  if (options.browser !== false) {
+  if (openInBrowser) {
     openBrowser(codes.verification_uri_complete);
   }
 
@@ -61,9 +94,7 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
     });
 
     if (poll.status === 200 && poll.data.token && poll.data.user) {
-      writeAuth({ server, token: poll.data.token, user: poll.data.user });
-      stdout.write(`\nLogged in as ${poll.data.user.name} <${poll.data.user.email}> on ${server}.\n`);
-      return;
+      return poll.data as ApprovedToken;
     }
     if (poll.status === 428) {
       continue;
@@ -81,7 +112,7 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
     throw new Error(`Unexpected response while waiting for approval (HTTP ${poll.status}).`);
   }
 
-  throw new Error('The login code expired. Run `aiolah auth login` again.');
+  throw new Error(`The login code expired. Run \`aiolah ${kind === 'login' ? 'auth login' : 'setup-token'}\` again.`);
 }
 
 export async function logoutCommand(): Promise<void> {
@@ -105,7 +136,9 @@ export async function statusCommand(): Promise<void> {
   const connected = PROVIDERS.filter((provider) => provider.kind !== 'aiolah' && isConnected(provider.id));
   stdout.write(
     `Active provider: ${resolveProvider()}${active?.model ? ` · ${active.model}` : ''}\n` +
-      `Own keys: ${connected.length ? connected.map((provider) => provider.id).join(', ') : 'none (aiolah connect <provider>)'}\n`,
+      `Own keys: ${
+        connected.length ? connected.map((provider) => provider.id).join(', ') : 'none (aiolah connect <provider>)'
+      }\n`,
   );
   if (process.env.ANTHROPIC_API_KEY) {
     stdout.write('Model calls: ANTHROPIC_API_KEY is set, so chat uses your own Anthropic key.\n');
@@ -115,17 +148,20 @@ export async function statusCommand(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const me = await apiRequest<{ user?: { name: string; email: string } }>(auth.server, '/api/v1/app/cli/me', {
-    token: auth.token,
-  });
-  if (me.status !== 200 || !me.data.user) {
+  const state = await checkLogin(auth);
+  const source = auth.kind === 'setup-token' ? 'AIOLAH_TOKEN' : 'Login';
+  if (!state?.valid || !state.user) {
     stdout.write(
-      `Stored login for ${auth.server} is no longer valid (HTTP ${me.status}). Run \`aiolah auth login\`.\n`,
+      state
+        ? `${source}: ${expiryLabel(state)} (${auth.server}). Run \`aiolah auth login\`.\n`
+        : `Could not reach ${auth.server} to check the login.\n`,
     );
     process.exitCode = 1;
     return;
   }
-  stdout.write(`Logged in as ${me.data.user.name} <${me.data.user.email}> on ${auth.server}.\n`);
+  stdout.write(
+    `Logged in as ${state.user.name} <${state.user.email}> on ${auth.server}.\n${source}: ${expiryLabel(state)}\n`,
+  );
 }
 
 function openBrowser(url: string): void {

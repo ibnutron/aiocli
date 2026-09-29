@@ -358,7 +358,8 @@ export async function resolveProviderModel(provider: string, explicit?: string):
     return def.defaultModel;
   }
   throw new Error(
-    `Choose a model for ${def.name}: run \`aiolah models --provider ${provider}\`, then pass --model <id> (or use /models in chat).`,
+    `Choose a model for ${def.name}: run \`aiolah models --provider ${provider}\`, ` +
+      'then pass --model <id> (or use /models in chat).',
   );
 }
 

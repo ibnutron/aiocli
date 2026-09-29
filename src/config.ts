@@ -6,11 +6,16 @@ import { join } from 'node:path';
 /**
  * Credentials written by `aiolah auth login`: a Sanctum token with the `cli`
  * ability for the aiolah server. Stored at ~/.aiolah/auth.json with mode 0600.
+ * A login expires unless it is used (the server extends it, up to a maximum);
+ * `expiresAt` is the last expiry the server reported.
  */
 export interface StoredAuth {
   server: string;
   token: string;
   user: { name: string; email: string };
+  expiresAt?: string | null;
+  /** `setup-token`: a long-lived token from AIOLAH_TOKEN (model requests only). */
+  kind?: 'login' | 'setup-token';
 }
 
 export const DEFAULT_SERVER = 'https://aiolah.com';
@@ -19,7 +24,20 @@ const CONFIG_DIR = join(homedir(), '.aiolah');
 const AUTH_FILE = join(CONFIG_DIR, 'auth.json');
 const MACHINE_ID_FILE = join(CONFIG_DIR, 'machine-id');
 
+/**
+ * The login in use: AIOLAH_TOKEN (a token from `aiolah setup-token`, for CI)
+ * wins over the one saved by `aiolah auth login`.
+ */
 export function readAuth(): StoredAuth | null {
+  const envToken = process.env.AIOLAH_TOKEN?.trim();
+  if (envToken) {
+    return {
+      server: (process.env.AIOLAH_SERVER || DEFAULT_SERVER).replace(/\/+$/, ''),
+      token: envToken,
+      user: { name: '', email: '' },
+      kind: 'setup-token',
+    };
+  }
   try {
     return JSON.parse(readFileSync(AUTH_FILE, 'utf8')) as StoredAuth;
   } catch {
@@ -31,6 +49,22 @@ export function writeAuth(auth: StoredAuth): void {
   mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
   writeFileSync(AUTH_FILE, JSON.stringify(auth, null, 2), { encoding: 'utf8', mode: 0o600 });
   chmodSync(AUTH_FILE, 0o600);
+}
+
+/** Remembers the expiry the server reported for the saved login (not for AIOLAH_TOKEN). */
+export function rememberExpiry(expiresAt: string | null | undefined): void {
+  const stored = readSavedAuth();
+  if (stored && !process.env.AIOLAH_TOKEN?.trim() && stored.expiresAt !== expiresAt) {
+    writeAuth({ ...stored, expiresAt: expiresAt ?? null });
+  }
+}
+
+function readSavedAuth(): StoredAuth | null {
+  try {
+    return JSON.parse(readFileSync(AUTH_FILE, 'utf8')) as StoredAuth;
+  } catch {
+    return null;
+  }
 }
 
 export function clearAuth(): void {

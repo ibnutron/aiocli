@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import { apiRequest, machineIdFor, relayHostUrl, serverUrl, type StoredAuth } from './config.js';
+import { expiredMessage } from './loginStatus.js';
 import { listProviderModels, providerDef } from './providers.js';
 import { fetchModels } from './models.js';
 import type { ImageInput, ModelOption, RelayFrame, WireMessage } from './protocol.js';
@@ -58,8 +59,11 @@ export async function registerHost(auth: StoredAuth, workspaceRoot: string, name
     token: auth.token,
     body: { machine_id: machineIdFor(workspaceRoot), name, workspace: workspaceRoot },
   });
+  if (registration.status === 403 && auth.kind === 'setup-token') {
+    throw new Error('AIOLAH_TOKEN only makes model requests; remote control needs `aiolah auth login`.');
+  }
   if (registration.status === 401 || registration.status === 403) {
-    throw new Error('Your aiolah login is no longer valid. Run `aiolah auth login` again.');
+    throw new Error(expiredMessage());
   }
   if (!registration.data.host_id) {
     throw new Error(`Could not register this machine with ${server} (HTTP ${registration.status}).`);

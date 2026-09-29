@@ -8,7 +8,7 @@ import { chatCommand } from './commands/chat.js';
 import { serveCommand } from './commands/serve.js';
 import { attachCommand } from './commands/attach.js';
 import { sessionsListCommand } from './commands/sessions.js';
-import { loginCommand, logoutCommand, statusCommand } from './commands/login.js';
+import { loginCommand, logoutCommand, setupTokenCommand, statusCommand } from './commands/login.js';
 import { relayCommand } from './commands/relay.js';
 import { modelsCommand } from './commands/models.js';
 import { connectCommand, disconnectCommand } from './commands/connect.js';
@@ -55,6 +55,13 @@ program
   .option('--no-browser', 'only print the URL, do not try to open a browser')
   .action(loginCommand);
 program.command('logout').description('Shortcut for "aiolah auth logout"').action(logoutCommand);
+
+program
+  .command('setup-token')
+  .description('Create a long-lived token for CI and scripts (printed, not saved; use it as AIOLAH_TOKEN)')
+  .option('--server <url>', 'aiolah server URL')
+  .option('--no-browser', 'only print the URL, do not try to open a browser')
+  .action(setupTokenCommand);
 
 addPermissionOptions(
   program
@@ -237,12 +244,18 @@ function loadPackageEnv(): void {
 /**
  * Shortcuts that don't fit commander's subcommand model:
  * - `aiolah` with no arguments starts `aiolah chat`;
- * - `aiolah -p "<prompt>"` / `aiolah --print "<prompt>"` is `aiolah run "<prompt>"`.
+ * - `aiolah -p "<prompt>"` / `aiolah --print "<prompt>"` is `aiolah run "<prompt>"`;
+ * - chat options without a command (`aiolah -r <id>`, `aiolah -c`,
+ *   `aiolah --permission-mode auto`) are options of `aiolah chat`.
  */
 function normalizeArgv(argv: string[]): string[] {
   const [node = 'node', script = 'aiolah', first, ...rest] = argv;
   if (first === undefined) {
     return [node, script, 'chat'];
+  }
+  const topLevel = ['-v', '--version', '-h', '--help', '-p', '--print'];
+  if (first.startsWith('-') && !topLevel.includes(first) && !first.startsWith('--print=')) {
+    return [node, script, 'chat', first, ...rest];
   }
   if (first === '-p' || first === '--print') {
     return [node, script, 'run', ...rest];

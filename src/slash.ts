@@ -16,6 +16,7 @@ import {
 import { connectFlow, disconnectCommand } from './commands/connect.js';
 import { style, tildify } from './ui.js';
 import { formatMcpStatus, type McpManager } from './mcp/index.js';
+import { checkLogin, expiryLabel } from './loginStatus.js';
 
 export interface SlashCommand {
   name: string;
@@ -77,7 +78,8 @@ function helpText(): string {
   const visible = SLASH_COMMANDS.filter((command) => !command.hidden);
   const width = Math.max(...visible.map((command) => `/${command.name} ${command.args ?? ''}`.length)) + 2;
   const commands = visible.map(
-    (command) => `  ${style.accent(`/${command.name} ${command.args ?? ''}`.padEnd(width))}${style.gray(command.description)}`,
+    (command) =>
+      `  ${style.accent(`/${command.name} ${command.args ?? ''}`.padEnd(width))}${style.gray(command.description)}`,
   );
   const shortcuts = [
     ['/', 'commands (Tab completes)'],
@@ -173,7 +175,8 @@ export async function handleSlash(line: string, context: SlashContext): Promise<
             ? sessions
                 .map(
                   (item) =>
-                    `  ${style.accent(item.id)}  ${style.gray(item.updatedAt.slice(0, 16).replace('T', ' '))}  ${tildify(item.workspace)}`,
+                    `  ${style.accent(item.id)}  ` +
+                    `${style.gray(item.updatedAt.slice(0, 16).replace('T', ' '))}  ${tildify(item.workspace)}`,
                 )
                 .join('\n')
             : style.gray('  No saved sessions.'),
@@ -183,6 +186,7 @@ export async function handleSlash(line: string, context: SlashContext): Promise<
 
       case 'status': {
         const auth = readAuth();
+        const login = auth ? await checkLogin(auth) : null;
         const row = (label: string, value: string) => `  ${style.gray(label.padEnd(10))}${value}`;
         print(
           [
@@ -190,7 +194,16 @@ export async function handleSlash(line: string, context: SlashContext): Promise<
             row('model', session.modelId || style.yellow('none — /models')),
             row('session', session.sessionId),
             row('workspace', tildify(session.workspace)),
-            row('aiolah', auth ? `signed in as ${auth.user.email}` : style.yellow('not signed in — /connect aiolah')),
+            row(
+              'aiolah',
+              auth
+                ? `signed in as ${login?.user?.email ?? auth.user.email}` +
+                    (auth.kind === 'setup-token' ? ' (AIOLAH_TOKEN)' : '')
+                : style.yellow('not signed in — /connect aiolah'),
+            ),
+            ...(auth
+              ? [row('login', login?.valid === false ? style.red(expiryLabel(login)) : expiryLabel(login))]
+              : []),
           ].join('\n'),
         );
         return 'handled';
@@ -356,7 +369,9 @@ async function connect(context: SlashContext, providerId?: string): Promise<void
 function switchTo(context: SlashContext, provider: string, model: string): void {
   context.session.useModel(provider, model);
   setActiveSelection(provider, model);
-  context.print(`  ${style.green('✓')} Now using ${style.bold(model)} ${style.gray(`· ${providerDef(provider).name}`)}`);
+  context.print(
+    `  ${style.green('✓')} Now using ${style.bold(model)} ${style.gray(`· ${providerDef(provider).name}`)}`,
+  );
 }
 
 function withTimeout<T>(promise: Promise<T>, milliseconds: number): Promise<T> {

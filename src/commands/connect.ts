@@ -86,7 +86,9 @@ export async function connectFlow(
     const shown = models.slice(0, MAX_MODELS_SHOWN);
     const choice = await pick(
       rl,
-      `Choose a model${models.length > shown.length ? ` (first ${shown.length}; any id also works with --model)` : ''}:`,
+      `Choose a model${
+        models.length > shown.length ? ` (first ${shown.length}; any id also works with --model)` : ''
+      }:`,
       shown,
     );
     model = choice === null ? undefined : shown[choice];

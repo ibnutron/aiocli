@@ -6,6 +6,7 @@ import { ChatSession, TurnInterruptedError, type PromptOrigin } from '../session
 import { SessionSync } from '../sessionSync.js';
 import { ChatRemote } from '../remoteChat.js';
 import { readAuth } from '../config.js';
+import { checkLogin, loginNotice } from '../loginStatus.js';
 import type { ImageInput } from '../protocol.js';
 import { findLatestSession } from '../persistence.js';
 import { ensureTrusted } from '../trust.js';
@@ -194,7 +195,8 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
     box.showHome();
   } else {
     stdout.write(
-      `aiolah chat — ${providerDef(session.providerId).name} · ${session.modelId || 'no model'}, workspace ${workspaceRoot}\n` +
+      `aiolah chat — ${providerDef(session.providerId).name} · ${session.modelId || 'no model'}, ` +
+        `workspace ${workspaceRoot}\n` +
         `Type /help for commands, "exit" to quit.\n`,
     );
   }
@@ -205,6 +207,15 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
     box.setNotice(style.yellow(mcpProblem));
   } else if (resumeId) {
     box.setNotice(style.gray(`Resumed session ${session.sessionId}`));
+  }
+  // Checking also renews the login (it stays valid while used); warn when it is about to end.
+  if (readAuth()) {
+    void checkLogin().then((state) => {
+      const notice = loginNotice(state);
+      if (notice) {
+        box.setNotice(style.yellow(notice));
+      }
+    });
   }
 
   try {
@@ -247,6 +258,9 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
     rl.close();
     remote?.stop();
     await Promise.all([sync?.flush(), mcp.close()]);
+    if (session.renderHistory().length) {
+      stdout.write(`\nResume this session with:\naiolah --resume ${session.sessionId}\n\n`);
+    }
   }
 }
 

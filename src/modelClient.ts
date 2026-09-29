@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import Anthropic from '@anthropic-ai/sdk';
 import { readAuth, serverUrl } from './config.js';
 import { authHeaders, providerCredentials, providerDef } from './providers.js';
+import { expiredMessage } from './loginStatus.js';
 
 type MessageParam = Anthropic.MessageParam;
 
@@ -47,7 +48,8 @@ export function createModelClient(provider: string): ModelClient {
   const { apiKey, baseURL } = providerCredentials(provider);
   if (def.needsKey && !apiKey) {
     throw new Error(
-      `No API key for ${def.name}. Run \`aiolah connect ${provider}\`${def.envKeys?.length ? ` or set ${def.envKeys[0]}` : ''}.`,
+      `No API key for ${def.name}. Run \`aiolah connect ${provider}\`` +
+        `${def.envKeys?.length ? ` or set ${def.envKeys[0]}` : ''}.`,
     );
   }
 
@@ -66,8 +68,16 @@ function anthropicClient(provider: string, client: Anthropic, viaAiolah: boolean
     provider,
     viaAiolah,
     async create(request, headers, signal) {
-      const response = await client.messages.create(request, { ...(headers ? { headers } : {}), signal });
-      return { content: response.content, stop_reason: response.stop_reason };
+      try {
+        const response = await client.messages.create(request, { ...(headers ? { headers } : {}), signal });
+        return { content: response.content, stop_reason: response.stop_reason };
+      } catch (error) {
+        // The aiolah login ran out (or was revoked): say so instead of a bare 401.
+        if (viaAiolah && error instanceof Anthropic.AuthenticationError) {
+          throw new Error(expiredMessage());
+        }
+        throw error;
+      }
     },
   };
 }

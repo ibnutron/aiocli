@@ -347,7 +347,15 @@ export class TerminalInput {
     this.mount();
     return new Promise((resolve) => {
       const flat = options.sections.flatMap((section) => section.items.filter((item) => !item.disabled));
-      this.picking = { options, query: '', selected: Math.max(0, flat.findIndex((item) => item.current)), resolve };
+      this.picking = {
+        options,
+        query: '',
+        selected: Math.max(
+          0,
+          flat.findIndex((item) => item.current),
+        ),
+        resolve,
+      };
       this.render();
     });
   }
@@ -417,7 +425,12 @@ export class TerminalInput {
     const contentColumn = MARGIN + 3;
     lines.push(panelRow(''));
     const title = style.bold(style.white(state.options.title));
-    spots.push({ row: lines.length, from: contentColumn + inner - 5, to: contentColumn + inner + 2, action: () => this.finishPick(null) });
+    spots.push({
+      row: lines.length,
+      from: contentColumn + inner - 5,
+      to: contentColumn + inner + 2,
+      action: () => this.finishPick(null),
+    });
     lines.push(panelRow(`${title}${' '.repeat(Math.max(1, inner - visibleLength(title) - 3))}${style.gray('esc')}`));
     lines.push(panelRow(''));
     const searchRow = lines.length;
@@ -459,12 +472,20 @@ export class TerminalInput {
     }
     // Keep the selected item in view.
     const height = this.pickListHeight();
-    const selectedAt = Math.max(0, rendered.findIndex((row) => row.selected));
+    const selectedAt = Math.max(
+      0,
+      rendered.findIndex((row) => row.selected),
+    );
     const start = Math.min(Math.max(0, selectedAt - Math.floor(height / 2)), Math.max(0, rendered.length - height));
     for (const row of rendered.slice(start, start + height)) {
       const { value } = row;
       if (value !== undefined) {
-        spots.push({ row: lines.length, from: MARGIN, to: contentColumn + inner + 2, action: () => this.finishPick(value) });
+        spots.push({
+          row: lines.length,
+          from: MARGIN,
+          to: contentColumn + inner + 2,
+          action: () => this.finishPick(value),
+        });
       }
       lines.push(panelRow(row.text));
     }
@@ -475,7 +496,12 @@ export class TerminalInput {
       let column = contentColumn;
       for (const action of actions) {
         const width = `${action.label} ctrl+${action.key}`.length;
-        spots.push({ row: lines.length, from: column, to: column + width, action: () => this.finishPick(action.value) });
+        spots.push({
+          row: lines.length,
+          from: column,
+          to: column + width,
+          action: () => this.finishPick(action.value),
+        });
         column += width + 3;
       }
       lines.push(
@@ -907,7 +933,10 @@ export class TerminalInput {
         { row: box.length, from: contentColumn + 23, to: contentColumn + 31, action: answer('no') },
       ];
       box.push(
-        panelRow(`${style.white('enter')} ${style.gray('allow')}  ${style.white('a')} ${style.gray('always')}  ${style.white('esc')} ${style.gray('deny')}`),
+        panelRow(
+          `${style.white('enter')} ${style.gray('allow')}  ${style.white('a')} ${style.gray('always')}  ` +
+            `${style.white('esc')} ${style.gray('deny')}`,
+        ),
       );
       box.push(panelRow(''));
     } else {
@@ -922,19 +951,28 @@ export class TerminalInput {
       shown.forEach((text) => box.push(panelRow(this.buffer ? text : style.gray(text))));
       cursor = { row: firstInputRow + row, col: contentColumn + col };
       box.push(panelRow(''));
-      box.push(panelRow(truncateStyled(`${info.mode} ${style.gray('·')} ${style.white(info.model || 'no model')} ${style.gray(info.provider)}`, inner)));
+      box.push(
+        panelRow(
+          truncateStyled(
+            `${info.mode} ${style.gray('·')} ${style.white(info.model || 'no model')} ${style.gray(info.provider)}`,
+            inner,
+          ),
+        ),
+      );
     }
     box.push(`${margin}${style.panelEdge('▀'.repeat(inner + 5))}`);
 
     // Status row: scanner + activity on the left, key hints on the right.
     const left = this.busy
-      ? `${scanner(this.frame)}  ${this.activity ? style.gray(truncate(this.activity, 24)) + '  ' : ''}${style.white('esc')} ${style.gray('interrupt')}`
+      ? `${scanner(this.frame)}  ${this.activity ? style.gray(truncate(this.activity, 24)) + '  ' : ''}` +
+        `${style.white('esc')} ${style.gray('interrupt')}`
       : this.notice;
     const queued = this.queue.length ? `${style.accent(`${this.queue.length} queued`)}  ` : '';
     const remote = this.info().remote ? `${style.green('/rc active')}  ` : '';
     const right = this.picking
       ? `${style.white('↑↓')} ${style.gray('select')}  ${style.white('enter')} ${style.gray('confirm')}`
-      : `${remote}${queued}${style.white('shift+tab')} ${style.gray('mode')}  ${style.white('/')} ${style.gray('commands')}`;
+      : `${remote}${queued}${style.white('shift+tab')} ${style.gray('mode')}  ` +
+        `${style.white('/')} ${style.gray('commands')}`;
     const room = width - MARGIN * 2 - 1;
     const status =
       visibleLength(left) + visibleLength(right) + 2 <= room
@@ -959,7 +997,8 @@ export class TerminalInput {
         footerRoom - version.length - 2,
       );
       footer = [
-        `${margin}${style.gray(place)}${' '.repeat(Math.max(2, footerRoom - place.length - version.length))}${style.gray(version)}`,
+        `${margin}${style.gray(place)}` +
+          `${' '.repeat(Math.max(2, footerRoom - place.length - version.length))}${style.gray(version)}`,
       ];
       const used = top.length + box.length + 1 + footer.length;
       // The menu takes its rows from the blank lines above the logo (the logo moves up,

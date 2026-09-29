@@ -1,3 +1,4 @@
+import { expiredMessage } from './loginStatus.js';
 import { apiRequest, readAuth, serverUrl } from './config.js';
 
 export interface CliModel {
@@ -29,7 +30,7 @@ export async function fetchModels(): Promise<CliModelList> {
     token: auth.token,
   });
   if (response.status === 401 || response.status === 403) {
-    throw new Error('Your aiolah login is no longer valid. Run `aiolah auth login` again.');
+    throw new Error(expiredMessage());
   }
   if (response.status !== 200) {
     throw new Error(`Could not load models from aiolah (HTTP ${response.status}).`);
