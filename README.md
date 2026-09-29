@@ -65,6 +65,26 @@ aiolah -r <session-id>  # resume a specific session (see: aiolah sessions list)
 The agent can only touch files inside the workspace folder (`-w`, default: the
 current folder).
 
+**Project instructions.** Every session reads `AGENTS.md`, `AIOLAH.md` and
+`CLAUDE.md` from the workspace root (an existing `CLAUDE.md` works as is), plus
+your own `~/.aiolah/AGENTS.md` for every project, and follows them. `/init`
+has the agent study the project and write `AGENTS.md` (commands, architecture,
+conventions); `/memory` lists the files in use, `/memory edit` opens the
+project's `AGENTS.md` in your editor (`$VISUAL` / `$EDITOR`) and `/memory user`
+your own. Edits apply from the next message.
+
+**Long sessions.** `/compact [instructions]` replaces the conversation with a
+summary the model writes (files, decisions, next steps), freeing up context.
+When a conversation nears the model's context window (80% of 128k tokens by
+default; set `AIOLAH_CONTEXT_WINDOW`), the next message compacts it first, and
+a request the model rejects as too long is compacted and retried once.
+`/status` shows the current size.
+
+**Conversations.** `/clear` (also `/new`) starts a new, empty conversation;
+the previous one stays saved. `/resume` picks a saved conversation (this
+folder's first) and shows it again; `/resume <id>` or `aiolah -r <id>` opens
+one directly.
+
 ### In scripts and CI
 
 One prompt in, the final answer out. Piped input is appended to the prompt.
@@ -205,13 +225,18 @@ Inside `aiolah chat`, type `/` commands:
 
 | Command | Description |
 |---|---|
+| `/clear` | Start a new conversation; the current one stays saved. Aliases: `/new`, `/reset`. |
+| `/resume [session]` | Continue a saved conversation (picker without an id). |
+| `/compact [instructions]` | Summarize the conversation to free up context. |
+| `/init` | Have the agent write `AGENTS.md` for this project. |
+| `/memory [edit\|user]` | List the instruction files in use, or edit the project's / your own. |
 | `/connect [provider]` | Connect aiolah or a provider key. |
 | `/disconnect <provider>` | Remove a provider key (or sign out of aiolah). |
 | `/provider [id]` | Switch provider, keeping the conversation. |
 | `/model [id]` | Switch model; without an id, pick from the provider's list. |
 | `/models` | List the current provider's models. |
 | `/sessions` | List saved sessions. |
-| `/status` | Show provider, model, session and login. |
+| `/status` | Show provider, model, session, context size and login. |
 | `/mcp` | Show MCP servers, their tools and why one failed to start. |
 | `/remote-control [name]` | Share this chat with aiolah /code, the app or VS Code; again to disconnect. Alias: `/rc`. |
 | `/help`, `/exit` | Help, quit. |
@@ -357,6 +382,7 @@ Session flags (chat, run, rc, serve):
 | `AIOLAH_SERVER` | aiolah server URL (default `https://aiolah.com`). Overrides the server saved at login. |
 | `AIOLAH_RELAY_URL` | Relay URL for remote control (default `<server>/cli-relay`). |
 | `AIOLAH_REMOTE_TOKEN` | Shared secret for direct mode (`serve --port` and `attach`). |
+| `AIOLAH_CONTEXT_WINDOW` | Context window (tokens) used to decide when to compact automatically (default 128000). |
 | `MCP_TIMEOUT` | Milliseconds to wait for an MCP server to start (default 30000). |
 | `MCP_TOOL_TIMEOUT` | Milliseconds an MCP tool call may take (default 600000; progress updates reset it). |
 

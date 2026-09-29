@@ -196,6 +196,13 @@ export class ChatRemote {
 
   /** Mirrors the session to the clients (prompts typed in the terminal, tools, answers). */
   private listen(): void {
+    // /clear or /resume in the terminal: clients follow to the new conversation.
+    this.session.on('session_changed', () => {
+      for (const peer of [...this.peers]) {
+        this.peers.delete(peer);
+        void this.connect(peer);
+      }
+    });
     this.session.on('turn_start', ({ text, origin }: { text: string; origin: PromptOrigin }) => {
       this.broadcast({ type: 'busy' });
       if (origin !== 'remote') {

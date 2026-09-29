@@ -17,6 +17,9 @@ import { connectFlow, disconnectCommand } from './commands/connect.js';
 import { style, tildify } from './ui.js';
 import { formatMcpStatus, type McpManager } from './mcp/index.js';
 import { checkLogin, expiryLabel } from './loginStatus.js';
+import { INIT_PROMPT, USER_INSTRUCTIONS_FILE, loadInstructions } from './instructions.js';
+import { join } from 'node:path';
+import type { SessionRecord } from './persistence.js';
 
 export interface SlashCommand {
   name: string;
@@ -28,6 +31,11 @@ export interface SlashCommand {
 
 /** Commands of `aiolah chat`, in the order the autocomplete menu and /help show them. */
 export const SLASH_COMMANDS: SlashCommand[] = [
+  { name: 'clear', description: 'Start a new conversation (the current one stays in /resume)' },
+  { name: 'resume', args: '[session]', description: 'Continue a saved conversation' },
+  { name: 'compact', args: '[instructions]', description: 'Summarize the conversation to free up context' },
+  { name: 'init', description: 'Create AGENTS.md with instructions for this project' },
+  { name: 'memory', args: '[edit|user]', description: 'Show or edit the instruction files (AGENTS.md…)' },
   { name: 'models', description: 'Switch model (all connected providers)' },
   { name: 'connect', args: '[provider]', description: 'Connect aiolah or your own provider key' },
   { name: 'disconnect', args: '<provider>', description: "Remove a provider's key (or sign out of aiolah)" },
@@ -39,12 +47,13 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     description: 'Control this chat from aiolah /code, the app or VS Code (again to disconnect)',
   },
   { name: 'sessions', description: 'List saved sessions (resume with: aiolah -r <id>)' },
-  { name: 'clear', description: 'Clear the screen' },
   { name: 'help', description: 'Show commands and shortcuts' },
   { name: 'exit', description: 'Quit' },
   { name: 'model', args: '[id]', description: 'Switch model', hidden: true },
   { name: 'provider', args: '[id]', description: 'Switch provider', hidden: true },
   { name: 'rc', args: '[name]', description: 'Same as /remote-control', hidden: true },
+  { name: 'new', description: 'Same as /clear', hidden: true },
+  { name: 'reset', description: 'Same as /clear', hidden: true },
 ];
 
 /** Menu commands whose name starts with `prefix` (without the slash). */
@@ -69,6 +78,10 @@ export interface SlashContext {
   clearScreen: () => void;
   /** Turns /remote-control on (with an optional device name) or off. */
   remoteControl?: (name?: string) => Promise<void>;
+  /** Runs a prompt as a turn of the chat, shown as `label` (used by /init). */
+  runPrompt?: (prompt: string, label: string) => Promise<void>;
+  /** Opens a file in the user's editor (/memory edit). */
+  editFile?: (path: string, template: string) => void;
 }
 
 const CONNECT_ACTION = '\u0000connect';
@@ -111,8 +124,80 @@ export async function handleSlash(line: string, context: SlashContext): Promise<
         return 'handled';
 
       case 'clear':
-        context.clearScreen();
+      case 'new':
+      case 'reset':
+        session.startNew();
         return 'handled';
+
+      case 'resume': {
+        const id = arg ?? (await pickSession(context));
+        if (id) {
+          session.resume(id);
+        }
+        return 'handled';
+      }
+
+      case 'compact': {
+        if (!session.modelId) {
+          print(style.yellow('  Choose a model first: /models'));
+          return 'handled';
+        }
+        context.loading('Compacting the conversation…');
+        let result: { before: number; after: number };
+        try {
+          result = await session.compact(arg);
+        } finally {
+          context.loading(null);
+        }
+        print(
+          result.before
+            ? style.gray(
+                `  Conversation compacted: about ${formatTokens(result.before)} → ` +
+                  `${formatTokens(result.after)} tokens.`,
+              )
+            : style.gray('  Nothing to compact yet.'),
+        );
+        return 'handled';
+      }
+
+      case 'init':
+        if (!context.runPrompt) {
+          print(style.yellow('  /init is only available in aiolah chat.'));
+        } else if (!session.modelId) {
+          print(style.yellow('  Choose a model first: /models'));
+        } else {
+          await context.runPrompt(INIT_PROMPT, '/init — create AGENTS.md for this project');
+        }
+        return 'handled';
+
+      case 'memory': {
+        const projectFile = join(session.workspace, 'AGENTS.md');
+        if (arg === 'edit' || arg === 'user') {
+          const path = arg === 'user' ? USER_INSTRUCTIONS_FILE : projectFile;
+          context.editFile?.(path, arg === 'user' ? USER_TEMPLATE : PROJECT_TEMPLATE);
+          print(style.gray(`  Saved edits to ${tildify(path)} apply from the next message.`));
+          return 'handled';
+        }
+        const files = loadInstructions(session.workspace);
+        print(
+          [
+            files.length
+              ? files
+                  .map(
+                    (file) =>
+                      `  ${style.bold(tildify(file.path))} ${style.gray(
+                        `(${file.scope}, ${file.content.length} chars` + `${file.truncated ? ', cut' : ''})`,
+                      )}`,
+                  )
+                  .join('\n')
+              : style.gray('  No instruction files yet. /init writes AGENTS.md for this project.'),
+            style.gray(
+              `  /memory edit opens ${tildify(projectFile)} · /memory user opens ${tildify(USER_INSTRUCTIONS_FILE)}`,
+            ),
+          ].join('\n'),
+        );
+        return 'handled';
+      }
 
       case 'exit':
       case 'quit':
@@ -193,6 +278,7 @@ export async function handleSlash(line: string, context: SlashContext): Promise<
             row('provider', `${providerDef(session.providerId).name} ${style.gray(`[${session.providerId}]`)}`),
             row('model', session.modelId || style.yellow('none — /models')),
             row('session', session.sessionId),
+            row('context', `about ${formatTokens(session.contextTokens)} tokens (/compact to shrink)`),
             row('workspace', tildify(session.workspace)),
             row(
               'aiolah',
@@ -387,5 +473,66 @@ function withTimeout<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
         reject(error instanceof Error ? error : new Error(String(error)));
       },
     );
+  });
+}
+
+const PROJECT_TEMPLATE = [
+  '# AGENTS.md',
+  '',
+  'Instructions for coding agents working in this project (read at the start of every aiolah session).',
+  '',
+  '## Commands',
+  '',
+  '## Conventions',
+  '',
+].join('\n');
+
+const USER_TEMPLATE = [
+  '# My instructions',
+  '',
+  "Read by aiolah in every project, before the project's own AGENTS.md.",
+  '',
+].join('\n');
+
+function formatTokens(tokens: number): string {
+  return tokens >= 1000 ? `${(tokens / 1000).toFixed(tokens >= 10_000 ? 0 : 1)}k` : String(tokens);
+}
+
+/** First words of the first prompt, to recognise a session in /resume. */
+function sessionTitle(record: SessionRecord): string {
+  for (const message of record.history) {
+    if (message.role !== 'user') continue;
+    const text =
+      typeof message.content === 'string'
+        ? message.content
+        : message.content
+            .filter((block) => block.type === 'text')
+            .map((block) => (block as { text: string }).text)
+            .join(' ');
+    if (text.trim()) return text.replace(/\s+/g, ' ').trim().slice(0, 70);
+  }
+  return '(empty)';
+}
+
+/** /resume without an id: pick one of the saved sessions, this folder's first. */
+async function pickSession(context: SlashContext): Promise<string | null> {
+  const all = listSessions().filter((record) => record.id !== context.session.sessionId && record.history.length);
+  const here = all.filter((record) => record.workspace === context.session.workspace).slice(0, 30);
+  const elsewhere = all.filter((record) => record.workspace !== context.session.workspace).slice(0, 20);
+  if (!here.length && !elsewhere.length) {
+    context.print(style.gray('  No saved sessions to resume.'));
+    return null;
+  }
+  const item = (record: SessionRecord, showFolder: boolean) => ({
+    label: sessionTitle(record),
+    detail: `${record.updatedAt.slice(0, 16).replace('T', ' ')}${showFolder ? ` · ${tildify(record.workspace)}` : ''}`,
+    value: record.id,
+  });
+  return context.pick({
+    title: 'Resume a session',
+    sections: [
+      ...(here.length ? [{ title: 'This folder', items: here.map((record) => item(record, false)) }] : []),
+      ...(elsewhere.length ? [{ title: 'Other folders', items: elsewhere.map((record) => item(record, true)) }] : []),
+    ],
   });
 }

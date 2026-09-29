@@ -1,7 +1,9 @@
 import * as readline from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { basename, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { ChatSession, TurnInterruptedError, type PromptOrigin } from '../session.js';
 import { SessionSync } from '../sessionSync.js';
 import { ChatRemote } from '../remoteChat.js';
@@ -136,10 +138,10 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
   const sync = SessionSync.attach(session, { origin: 'terminal' });
 
   /** One turn with the chat's output: the prompt, tool lines, the answer and the footer. */
-  async function runTurn(text: string, origin: PromptOrigin, images: ImageInput[] = []): Promise<void> {
+  async function runTurn(text: string, origin: PromptOrigin, images: ImageInput[] = [], label?: string): Promise<void> {
     const attached = images.length ? ` [${images.length} image${images.length === 1 ? '' : 's'}]` : '';
     const source = origin === 'remote' ? `\n${' '.repeat(CONTENT_INDENT)}${style.gray('from /code')}` : '';
-    box.print(`${userMessage(`${text}${attached}`)}${source}\n`);
+    box.print(`${userMessage(`${label ?? text}${attached}`)}${source}\n`);
     if (!session.modelId) {
       box.print(`${' '.repeat(CONTENT_INDENT)}${style.yellow('Choose a model first:')} ${style.accent('/models')}\n`);
       return;
@@ -163,6 +165,57 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
       box.print(`\n${turnFooter(modeLabel(permissionMode), session.modelId, Date.now() - startedAt, true)}\n`);
     } finally {
       pendingTools.length = 0;
+    }
+  }
+
+  // /clear and /resume switch the conversation: redraw the screen for it.
+  session.on('session_changed', ({ reason }: { reason: 'new' | 'resume' }) => {
+    box.clearScreen();
+    if (reason === 'resume') {
+      const items = session.renderHistory();
+      const shown = items.slice(-RESUME_TRANSCRIPT_ITEMS);
+      if (items.length > shown.length) {
+        box.print(style.gray(`${' '.repeat(CONTENT_INDENT)}… ${items.length - shown.length} earlier messages`));
+      }
+      for (const item of shown) {
+        if (item.role === 'tool') {
+          box.print(toolLine(item.name, item.input, item.result));
+        } else if (item.role === 'user') {
+          box.print(`\n${userMessage(item.text)}\n`);
+        } else {
+          box.print(assistantMessage(item.text.trim()));
+        }
+      }
+      box.setNotice(style.gray(`Resumed session ${session.sessionId}`));
+    } else {
+      box.setNotice(style.gray('New conversation — the previous one is in /resume'));
+    }
+  });
+  // Automatic compaction (near the context limit) shows in the status row.
+  session.on('compact_start', ({ trigger }: { trigger: string }) => {
+    if (trigger !== 'manual') {
+      box.setActivity('Compacting the conversation…');
+    }
+  });
+  session.on('compact_end', ({ trigger, ok }: { trigger: string; ok: boolean }) => {
+    if (trigger !== 'manual' && ok) {
+      box.print(style.gray(`${' '.repeat(CONTENT_INDENT)}Conversation compacted to fit the context window.`));
+    }
+  });
+
+  /** `/memory edit`: opens an instruction file in $VISUAL / $EDITOR, creating it from a template. */
+  function editFile(path: string, template: string): void {
+    if (!existsSync(path)) {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, template, 'utf8');
+    }
+    const editor = process.env.VISUAL || process.env.EDITOR || (process.platform === 'win32' ? 'notepad' : 'nano');
+    box.unmount();
+    stdin.setRawMode?.(false);
+    const result = spawnSync(editor, [path], { stdio: 'inherit', shell: process.platform === 'win32' });
+    stdin.setRawMode?.(true);
+    if (result.error) {
+      box.print(style.yellow(`${' '.repeat(CONTENT_INDENT)}Could not start ${editor}: ${result.error.message}`));
     }
   }
 
@@ -242,6 +295,11 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
           suspend: () => box.unmount(),
           clearScreen: () => box.clearScreen(),
           remoteControl: toggleRemote,
+          runPrompt: async (prompt, label) => {
+            await waitUntilIdle(session);
+            await runTurn(prompt, 'terminal', [], label);
+          },
+          editFile,
         });
         if (result === 'exit') break;
         box.print('');
@@ -263,6 +321,9 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
     }
   }
 }
+
+/** How many messages /resume shows again on screen. */
+const RESUME_TRANSCRIPT_ITEMS = 30;
 
 /** Resolves once the session has no running turn. */
 function waitUntilIdle(session: ChatSession): Promise<void> {

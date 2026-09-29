@@ -18,6 +18,8 @@ export interface ModelRequest {
 export interface ModelResponse {
   content: Anthropic.ContentBlock[];
   stop_reason: string | null;
+  /** Prompt size of this request, when the provider reports it (drives auto-compaction). */
+  usage?: { input_tokens: number; output_tokens: number };
 }
 
 /**
@@ -70,7 +72,11 @@ function anthropicClient(provider: string, client: Anthropic, viaAiolah: boolean
     async create(request, headers, signal) {
       try {
         const response = await client.messages.create(request, { ...(headers ? { headers } : {}), signal });
-        return { content: response.content, stop_reason: response.stop_reason };
+        return {
+          content: response.content,
+          stop_reason: response.stop_reason,
+          usage: { input_tokens: response.usage.input_tokens, output_tokens: response.usage.output_tokens },
+        };
       } catch (error) {
         // The aiolah login ran out (or was revoked): say so instead of a bare 401.
         if (viaAiolah && error instanceof Anthropic.AuthenticationError) {
@@ -126,6 +132,7 @@ interface OpenAiToolCall {
 
 interface OpenAiResponse {
   choices?: { finish_reason?: string; message?: { content?: string | null; tool_calls?: OpenAiToolCall[] } }[];
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
   error?: { message?: string };
 }
 
@@ -237,5 +244,13 @@ export function toAnthropicResponse(body: OpenAiResponse): ModelResponse {
   return {
     content,
     stop_reason: hasToolCalls ? 'tool_use' : choice.finish_reason === 'length' ? 'max_tokens' : 'end_turn',
+    ...(body.usage
+      ? {
+          usage: {
+            input_tokens: Number(body.usage.prompt_tokens ?? 0),
+            output_tokens: Number(body.usage.completion_tokens ?? 0),
+          },
+        }
+      : {}),
   };
 }

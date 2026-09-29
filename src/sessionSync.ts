@@ -22,7 +22,8 @@ const MAX_BACKOFF_MS = 30_000;
  */
 export class SessionSync {
   /** aiolah session uuid, or null when registration failed. */
-  readonly ready: Promise<string | null>;
+  /** The session's uuid on aiolah (re-registered when /clear or /resume switches the conversation). */
+  ready: Promise<string | null>;
   private readonly queue: SyncEvent[] = [];
   private timer: NodeJS.Timeout | undefined;
   private flushing = false;
@@ -32,7 +33,7 @@ export class SessionSync {
   private constructor(
     private readonly auth: StoredAuth,
     private readonly session: ChatSession,
-    meta: { hostId?: number; origin: PromptOrigin },
+    private readonly meta: { hostId?: number; origin: PromptOrigin },
   ) {
     this.ready = this.register(meta);
     this.listen();
@@ -46,7 +47,8 @@ export class SessionSync {
 
   /** Links the session to a device on aiolah (after /remote-control in chat), so /code lists it there. */
   linkHost(hostId: number): void {
-    void this.register({ hostId, origin: 'terminal' });
+    this.meta.hostId = hostId;
+    void this.register(this.meta);
   }
 
   private async register(meta: { hostId?: number; origin: PromptOrigin }): Promise<string | null> {
@@ -68,7 +70,15 @@ export class SessionSync {
     }
   }
 
+  /** /clear or /resume: finish sending the old conversation, then register the new one. */
+  private async switchSession(): Promise<void> {
+    await this.flush();
+    this.queue.length = 0;
+    this.ready = this.register(this.meta);
+  }
+
   private listen(): void {
+    this.session.on('session_changed', () => void this.switchSession());
     this.session.on(
       'turn_start',
       ({ text, origin, images }: { text: string; origin: PromptOrigin; images?: number }) => {

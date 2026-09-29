@@ -2,12 +2,13 @@ import { EventEmitter } from 'node:events';
 import Anthropic from '@anthropic-ai/sdk';
 import { TOOL_SCHEMAS, executeTool, type ConfirmFn } from './tools/index.js';
 import { generateSessionId, loadSession, saveSession, type SessionRecord } from './persistence.js';
-import { createModelClient, type ModelClient } from './modelClient.js';
+import { createModelClient, type ModelClient, type ModelResponse } from './modelClient.js';
 import { packageVersion } from './version.js';
 import type { HistoryItem, ImageInput } from './protocol.js';
 import type { McpManager } from './mcp/manager.js';
 import { reviewWithModel, type AutoVerdict } from './autoMode.js';
 import { decidePermission, type PermissionMode } from './permissions.js';
+import { buildSystemPrompt } from './instructions.js';
 
 type MessageParam = Anthropic.MessageParam;
 
@@ -24,6 +25,56 @@ export class TurnInterruptedError extends Error {
 }
 
 const INTERRUPTED_TOOL_RESULT = 'Interrupted by the user before this ran.';
+
+const MAX_OUTPUT_TOKENS = 4096;
+const CHARS_PER_TOKEN = 4;
+/** Context window assumed when the model's is unknown; AIOLAH_CONTEXT_WINDOW overrides it. */
+const DEFAULT_CONTEXT_WINDOW = 128_000;
+/** Share of the context window after which the next turn starts by compacting. */
+const AUTO_COMPACT_RATIO = 0.8;
+
+const COMPACT_PREAMBLE = 'This session continues an earlier conversation. Summary of what happened so far:';
+
+const COMPACT_INSTRUCTIONS = [
+  'Summarize our conversation so far so that the work can continue from the summary alone. Include:',
+  "- the user's requests and intent, in order, and any preferences or constraints they stated;",
+  '- key decisions and why they were made;',
+  '- files read or changed (with paths) and what was changed;',
+  '- commands run and results that matter, errors met and how they were fixed;',
+  '- the current state and the next steps still open.',
+  'Be specific (names, paths, values) and concise. Reply with the summary only.',
+].join('\n');
+
+function autoCompactThreshold(): number {
+  const window = Number(process.env.AIOLAH_CONTEXT_WINDOW) || DEFAULT_CONTEXT_WINDOW;
+  return Math.floor(window * AUTO_COMPACT_RATIO);
+}
+
+const CONTEXT_OVERFLOW_PATTERNS = [
+  /context[ _-]?(length|window|limit)/i,
+  /prompt is too long|too many tokens|maximum context|token limit|reduce the length/i,
+  /exceeds? the (maximum|limit)/i,
+];
+
+/** Provider errors that mean "the conversation is too long for this model". */
+export function isContextOverflow(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+/** The second half of a conversation, starting at a user message that isn't a tool result. */
+function laterHalf(messages: MessageParam[]): MessageParam[] {
+  for (let index = Math.floor(messages.length / 2); index < messages.length; index += 1) {
+    const message = messages[index]!;
+    if (
+      message.role === 'user' &&
+      (typeof message.content === 'string' || !message.content.some((block) => block.type === 'tool_result'))
+    ) {
+      return messages.slice(index);
+    }
+  }
+  return messages.slice(-1);
+}
 
 /**
  * Where a prompt came from, sent to aiolah (which logs every prompt it
@@ -66,9 +117,11 @@ export class ChatSession extends EventEmitter {
   private readonly workspaceRoot: string;
   private readonly confirm: ConfirmFn;
   private readonly mcp?: McpManager;
-  private readonly id: string;
-  private readonly createdAt: string;
+  private id: string;
+  private createdAt: string;
   private history: MessageParam[];
+  /** Prompt size of the last request (from the provider's usage), 0 when unknown. */
+  private lastInputTokens = 0;
   private abortController: AbortController | null = null;
   /** aiolah context headers of the running turn (reused by auto-mode reviews). */
   private turnHeaders: Record<string, string> | undefined;
@@ -126,6 +179,52 @@ export class ChatSession extends EventEmitter {
 
   get workspace(): string {
     return this.workspaceRoot;
+  }
+
+  /** Tokens the conversation takes: the last reported prompt size, or an estimate. */
+  get contextTokens(): number {
+    return this.lastInputTokens || Math.round(JSON.stringify(this.history).length / CHARS_PER_TOKEN);
+  }
+
+  /** `/clear`: a new, empty conversation (the old one stays saved for /resume). */
+  startNew(): void {
+    this.assertIdle();
+    this.id = generateSessionId();
+    this.createdAt = new Date().toISOString();
+    this.history = [];
+    this.lastInputTokens = 0;
+    this.emit('session_changed', { reason: 'new' });
+  }
+
+  /** `/resume`: continue a saved conversation in this chat. */
+  resume(id: string): void {
+    this.assertIdle();
+    const record = loadSession(id);
+    this.id = record.id;
+    this.createdAt = record.createdAt;
+    this.history = record.history;
+    this.lastInputTokens = 0;
+    this.emit('session_changed', { reason: 'resume' });
+  }
+
+  /**
+   * `/compact`: replaces the conversation with a summary written by the model,
+   * so a long session keeps working within the model's context window.
+   */
+  async compact(instructions?: string): Promise<{ before: number; after: number }> {
+    this.assertIdle();
+    if (!this.history.length) {
+      return { before: 0, after: 0 };
+    }
+    const before = this.contextTokens;
+    await this.compactHistory(false, instructions);
+    return { before, after: this.contextTokens };
+  }
+
+  private assertIdle(): void {
+    if (this.abortController) {
+      throw new Error('Wait for the current turn to finish (or press Esc).');
+    }
   }
 
   /** True while a turn is running. */
@@ -239,6 +338,11 @@ export class ChatSession extends EventEmitter {
     images: ImageInput[],
     signal: AbortSignal,
   ): Promise<ChatTurnResult> {
+    // Near the context limit: summarize before adding more.
+    if (this.history.length && this.contextTokens > autoCompactThreshold()) {
+      await this.compactHistory(false, undefined, signal, 'auto');
+    }
+
     this.history.push({
       role: 'user',
       content: images.length
@@ -262,18 +366,34 @@ export class ChatSession extends EventEmitter {
         }
       : undefined);
 
+    let compactedForOverflow = false;
     while (true) {
-      const response = await this.client.create(
-        {
-          model: this.model,
-          max_tokens: 4096,
-          tools: this.mcp ? [...TOOL_SCHEMAS, ...this.mcp.toolSchemas] : TOOL_SCHEMAS,
-          messages: this.history,
-        },
-        headers,
-        signal,
-      );
+      let response: ModelResponse;
+      try {
+        response = await this.client.create(
+          {
+            model: this.model,
+            max_tokens: MAX_OUTPUT_TOKENS,
+            system: buildSystemPrompt(this.workspaceRoot),
+            tools: this.tools(),
+            messages: this.history,
+          },
+          headers,
+          signal,
+        );
+      } catch (error) {
+        // The conversation no longer fits: summarize it once and try again.
+        if (!compactedForOverflow && !signal.aborted && isContextOverflow(error) && this.history.length > 1) {
+          compactedForOverflow = true;
+          await this.compactHistory(true, undefined, signal, 'overflow');
+          continue;
+        }
+        throw error;
+      }
       signal.throwIfAborted();
+      if (response.usage?.input_tokens) {
+        this.lastInputTokens = response.usage.input_tokens + (response.usage.output_tokens ?? 0);
+      }
 
       this.history.push({ role: 'assistant', content: response.content });
       this.persist();
@@ -318,6 +438,91 @@ export class ChatSession extends EventEmitter {
       this.persist();
       signal.throwIfAborted();
     }
+  }
+
+  private tools(): Anthropic.Tool[] {
+    return this.mcp ? [...TOOL_SCHEMAS, ...this.mcp.toolSchemas] : TOOL_SCHEMAS;
+  }
+
+  /**
+   * Replaces the history with a model-written summary. `midTurn`: the turn is
+   * still running (the history ends with tool results), so the summary ends
+   * with an instruction to carry on instead of an assistant acknowledgement.
+   * If even the summary request is too long, older messages are dropped first.
+   */
+  private async compactHistory(
+    midTurn: boolean,
+    instructions?: string,
+    signal?: AbortSignal,
+    trigger: 'manual' | 'auto' | 'overflow' = 'manual',
+  ): Promise<void> {
+    this.emit('compact_start', { trigger });
+    let messages = this.history;
+    let summary = '';
+    for (let attempt = 0; attempt < 3 && !summary; attempt += 1) {
+      try {
+        summary = await this.summarize(messages, instructions, signal);
+      } catch (error) {
+        if (!isContextOverflow(error)) {
+          this.emit('compact_end', { trigger, ok: false });
+          throw error;
+        }
+        messages = laterHalf(messages);
+      }
+    }
+    const note = summary
+      ? `${COMPACT_PREAMBLE}\n\n${summary}`
+      : 'The earlier part of this conversation was dropped because it no longer fit in the context window.';
+    this.history = midTurn
+      ? [{ role: 'user', content: `${note}\n\nContinue the current task from where it stopped.` }]
+      : [
+          { role: 'user', content: note },
+          {
+            role: 'assistant',
+            content: 'Understood — I have the summary of our earlier work and will continue from it.',
+          },
+        ];
+    this.lastInputTokens = 0;
+    this.persist();
+    this.emit('compact_end', { trigger, ok: true });
+  }
+
+  private async summarize(messages: MessageParam[], instructions?: string, signal?: AbortSignal): Promise<string> {
+    const request = [COMPACT_INSTRUCTIONS, instructions ? `\nAlso: ${instructions}` : ''].join('');
+    const last = messages[messages.length - 1];
+    // End with one user message that asks for the summary (merged into trailing tool results).
+    const withRequest: MessageParam[] =
+      last?.role === 'user'
+        ? [
+            ...messages.slice(0, -1),
+            {
+              role: 'user',
+              content: [
+                ...(typeof last.content === 'string' ? [{ type: 'text' as const, text: last.content }] : last.content),
+                { type: 'text' as const, text: request },
+              ],
+            },
+          ]
+        : [...messages, { role: 'user', content: request }];
+    const response = await this.client.create(
+      {
+        model: this.model,
+        max_tokens: MAX_OUTPUT_TOKENS,
+        system: 'You summarize a coding session so that it can continue with less context. Do not call tools.',
+        // Tool definitions are required when the history contains tool calls.
+        tools: this.tools(),
+        messages: withRequest,
+      },
+      this.client.viaAiolah
+        ? { ...(this.turnHeaders ?? { 'X-Aiolah-Session': this.id }), 'X-Aiolah-Purpose': 'compact' }
+        : undefined,
+      signal,
+    );
+    return response.content
+      .filter((block): block is Anthropic.TextBlock => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n')
+      .trim();
   }
 
   /** Auto mode: asks the session's model whether `action` may run without the user. */
