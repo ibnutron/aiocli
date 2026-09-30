@@ -39,6 +39,8 @@ export interface BoxInfo {
   version: string;
   /** This chat is shared with /code through /remote-control. */
   remote?: boolean;
+  /** Output of the /statusline command, shown under the box when nothing else is. */
+  statusLine?: string;
 }
 
 export interface TerminalInputHandlers {
@@ -134,6 +136,10 @@ export class TerminalInput {
 
   private buffer = '';
   private cursor = 0;
+  /** /vim: Esc switches to normal mode, i/a/A/I back to insert. */
+  private vimEnabled = false;
+  private vimNormal = false;
+  private vimPending = '';
   private pasting = false;
   private readonly history: string[] = [];
   private historyIndex = -1;
@@ -638,6 +644,22 @@ export class TerminalInput {
     if (key.name === 'escape') {
       if (this.busy) {
         this.handlers.onInterrupt();
+      } else if (this.vimEnabled && !this.vimNormal) {
+        this.vimNormal = true;
+        this.cursor = Math.max(0, this.cursor - 1);
+        this.render();
+      }
+      return;
+    }
+
+    if (this.vimEnabled && this.vimNormal && !this.pasting && !key.ctrl && !key.meta) {
+      if (key.name === 'return' || key.name === 'enter') {
+        this.vimNormal = false;
+        this.submit();
+        return;
+      }
+      if (this.vimKey(sequence, key)) {
+        this.afterEdit();
       }
       return;
     }
@@ -682,6 +704,117 @@ export class TerminalInput {
             : null;
     if (answer) {
       this.answerConfirm(answer);
+    }
+  }
+
+  /** Turns vim editing mode on or off (/vim). */
+  setVim(enabled: boolean): void {
+    this.vimEnabled = enabled;
+    this.vimNormal = false;
+    this.vimPending = '';
+    this.refresh();
+  }
+
+  /** Normal-mode keys of /vim. Returns true when the buffer or cursor changed. */
+  private vimKey(sequence: string | undefined, key: Key): boolean {
+    const { buffer, cursor } = this;
+    const lineStart = buffer.lastIndexOf('\n', cursor - 1) + 1;
+    const lineEndAt = buffer.indexOf('\n', cursor);
+    const lineEnd = lineEndAt === -1 ? buffer.length : lineEndAt;
+    const pending = this.vimPending;
+    this.vimPending = '';
+    const insert = (at: number) => {
+      this.cursor = Math.max(0, Math.min(buffer.length, at));
+      this.vimNormal = false;
+    };
+    switch (
+      key.name === 'left'
+        ? 'h'
+        : key.name === 'right'
+          ? 'l'
+          : key.name === 'up'
+            ? 'k'
+            : key.name === 'down'
+              ? 'j'
+              : sequence
+    ) {
+      case 'h':
+        this.cursor = Math.max(lineStart, cursor - 1);
+        return true;
+      case 'l':
+        this.cursor = Math.min(Math.max(lineStart, lineEnd - 1), cursor + 1);
+        return true;
+      case '0':
+        this.cursor = lineStart;
+        return true;
+      case '$':
+        this.cursor = Math.max(lineStart, lineEnd - 1);
+        return true;
+      case 'w': {
+        const match = /\S*\s+\S/.exec(buffer.slice(cursor));
+        this.cursor = match ? cursor + match[0].length - 1 : buffer.length;
+        return true;
+      }
+      case 'b': {
+        const before = buffer.slice(0, cursor).replace(/\s+$/, '');
+        this.cursor = before.replace(/\S+$/, '').length;
+        return true;
+      }
+      case 'e': {
+        const match = /^\s*\S+/.exec(buffer.slice(cursor + 1));
+        this.cursor = match ? cursor + match[0].length : cursor;
+        return true;
+      }
+      case 'x':
+        this.buffer = buffer.slice(0, cursor) + buffer.slice(cursor + 1);
+        this.cursor = Math.min(cursor, Math.max(0, this.buffer.length - 1));
+        return true;
+      case 'X':
+        if (cursor > lineStart) {
+          this.buffer = buffer.slice(0, cursor - 1) + buffer.slice(cursor);
+          this.cursor = cursor - 1;
+        }
+        return true;
+      case 'D':
+      case 'C':
+        this.buffer = buffer.slice(0, cursor) + buffer.slice(lineEnd);
+        if (sequence === 'C') insert(cursor);
+        else this.cursor = Math.max(lineStart, cursor - 1);
+        return true;
+      case 'd':
+      case 'c':
+        if (pending === sequence) {
+          this.buffer = buffer.slice(0, lineStart) + buffer.slice(Math.min(buffer.length, lineEnd + 1));
+          this.cursor = Math.min(lineStart, this.buffer.length);
+          if (sequence === 'c') insert(this.cursor);
+        } else {
+          this.vimPending = sequence ?? '';
+        }
+        return true;
+      case 'S':
+        this.buffer = buffer.slice(0, lineStart) + buffer.slice(lineEnd);
+        insert(lineStart);
+        return true;
+      case 'i':
+        insert(cursor);
+        return true;
+      case 'a':
+        insert(Math.min(lineEnd, cursor + 1));
+        return true;
+      case 'A':
+        insert(lineEnd);
+        return true;
+      case 'I':
+        insert(lineStart);
+        return true;
+      case 'k':
+        this.recall(1);
+        return true;
+      case 'j':
+        this.recall(-1);
+        return true;
+      default:
+        return false;
     }
   }
 
@@ -963,10 +1096,13 @@ export class TerminalInput {
     box.push(`${margin}${style.panelEdge('▀'.repeat(inner + 5))}`);
 
     // Status row: scanner + activity on the left, key hints on the right.
+    const vimMode = this.vimEnabled
+      ? `${this.vimNormal ? style.yellow('-- NORMAL --') : style.gray('-- INSERT --')}  `
+      : '';
     const left = this.busy
       ? `${scanner(this.frame)}  ${this.activity ? style.gray(truncate(this.activity, 24)) + '  ' : ''}` +
         `${style.white('esc')} ${style.gray('interrupt')}`
-      : this.notice;
+      : `${vimMode}${this.notice || style.gray(this.info().statusLine ?? '')}`;
     const queued = this.queue.length ? `${style.accent(`${this.queue.length} queued`)}  ` : '';
     const remote = this.info().remote ? `${style.green('/rc active')}  ` : '';
     const right = this.picking

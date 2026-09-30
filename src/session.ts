@@ -7,6 +7,7 @@ import { TOOL_SCHEMAS, USE_SKILL_SCHEMA, executeTool, type ConfirmFn } from './t
 import { loadCustomCommands } from './customCommands.js';
 import { loadAgents, taskToolSchema, type AgentDefinition } from './agents.js';
 import { runHooks } from './hooks.js';
+import { log } from './log.js';
 import { generateSessionId, loadSession, saveSession, type SessionRecord } from './persistence.js';
 import { createModelClient, type ModelClient, type ModelResponse } from './modelClient.js';
 import { packageVersion } from './version.js';
@@ -735,6 +736,11 @@ export class ChatSession extends EventEmitter {
     if (signal.aborted) {
       content = `${content}\n(interrupted by the user)`;
     }
+    log(content.startsWith('Error:') ? 'WARN' : 'DEBUG', 'tool call', {
+      tool: name,
+      agent,
+      error: content.startsWith('Error:') ? content.slice(0, 300) : undefined,
+    });
     this.emit('tool_result', { name, result: content, agent });
     return content;
   }
@@ -824,6 +830,7 @@ export class ChatSession extends EventEmitter {
     signal?: AbortSignal,
     trigger: 'manual' | 'auto' | 'overflow' = 'manual',
   ): Promise<void> {
+    log('INFO', 'compacting conversation', { trigger, tokens: this.contextTokens });
     this.emit('compact_start', { trigger });
     let messages = this.history;
     let summary = '';

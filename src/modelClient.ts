@@ -3,6 +3,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { readAuth, serverUrl } from './config.js';
 import { authHeaders, providerCredentials, providerDef } from './providers.js';
 import { expiredMessage } from './loginStatus.js';
+import { log } from './log.js';
 
 type MessageParam = Anthropic.MessageParam;
 
@@ -32,7 +33,45 @@ export interface ModelClient {
   create(request: ModelRequest, headers?: Record<string, string>, signal?: AbortSignal): Promise<ModelResponse>;
 }
 
+/** Logs every model request: provider, model, duration, prompt size, and errors. */
+function withLogging(client: ModelClient): ModelClient {
+  return {
+    provider: client.provider,
+    viaAiolah: client.viaAiolah,
+    async create(request, headers, signal) {
+      const started = Date.now();
+      const purpose = headers?.['X-Aiolah-Purpose'] ?? 'turn';
+      try {
+        const response = await client.create(request, headers, signal);
+        log('INFO', 'model request', {
+          provider: client.provider,
+          model: request.model,
+          purpose,
+          ms: Date.now() - started,
+          stop: response.stop_reason,
+          input_tokens: response.usage?.input_tokens,
+          output_tokens: response.usage?.output_tokens,
+        });
+        return response;
+      } catch (error) {
+        log('ERROR', 'model request failed', {
+          provider: client.provider,
+          model: request.model,
+          purpose,
+          ms: Date.now() - started,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
+    },
+  };
+}
+
 export function createModelClient(provider: string): ModelClient {
+  return withLogging(createUnloggedClient(provider));
+}
+
+function createUnloggedClient(provider: string): ModelClient {
   const def = providerDef(provider);
 
   if (def.kind === 'aiolah') {

@@ -1,6 +1,7 @@
 import WebSocket from 'ws';
 import { apiRequest, machineIdFor, relayHostUrl, serverUrl, type StoredAuth } from './config.js';
 import { expiredMessage } from './loginStatus.js';
+import { log as writeLog } from './log.js';
 import { listProviderModels, providerDef } from './providers.js';
 import { fetchModels } from './models.js';
 import type { ImageInput, ModelOption, RelayFrame, WireMessage } from './protocol.js';
@@ -114,6 +115,7 @@ export function startRelay<R>(
     socket.on('open', () => {
       backoff = 1000;
       resetSilenceTimer();
+      writeLog('INFO', 'relay connected', { hostId });
       log('connected to aiolah relay — open /code on aiolah to control this machine');
     });
     socket.on('ping', resetSilenceTimer);
@@ -185,6 +187,7 @@ export function startRelay<R>(
       if (stopped) {
         return;
       }
+      writeLog('WARN', 'relay connection lost', { hostId, retryMs: backoff });
       log(`relay connection lost — retrying in ${Math.round(backoff / 1000)}s`);
       reconnectTimer = setTimeout(connect, backoff);
       backoff = Math.min(backoff * 2, RELAY_BACKOFF_MAX_MS);

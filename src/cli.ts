@@ -15,9 +15,11 @@ import { connectCommand, disconnectCommand } from './commands/connect.js';
 import { uninstallCommand } from './commands/uninstall.js';
 import { runCommand } from './commands/run.js';
 import { upgradeCommand } from './commands/upgrade.js';
+import { acpCommand } from './commands/acp.js';
 import { doctorCommand } from './commands/doctor.js';
 import { collect, mcpAddCommand, mcpListCommand, mcpRemoveCommand, mcpResetCommand } from './commands/mcp.js';
 import { packageVersion } from './version.js';
+import { LOG_FILE, extractLogFlags } from './log.js';
 import { addPermissionOptions } from './permissions.js';
 
 loadPackageEnv();
@@ -127,6 +129,14 @@ addPermissionOptions(
     .option('--add-dir <dirs...>', 'other directories the agent may use besides the workspace'),
 ).action(runCommand);
 
+addPermissionOptions(
+  program
+    .command('acp')
+    .description('Run as an Agent Client Protocol agent over stdio, for editors such as Zed')
+    .option('-m, --model <model>', "model id (default: the provider's default)")
+    .option('-P, --provider <id>', 'model provider: aiolah (your plan) or one you connected'),
+).action(acpCommand);
+
 program
   .command('attach <address>')
   .description('Attach to a running "aiolah serve" session, e.g. aiolah attach ws://host:4317')
@@ -220,10 +230,23 @@ mcp
 const sessions = program.command('sessions').description('Manage saved chat sessions');
 sessions.command('list').description('List saved sessions').action(sessionsListCommand);
 
-program.parseAsync(normalizeArgv(process.argv)).catch((error: unknown) => {
+program.addHelpText(
+  'after',
+  `\nLogging (any command): --print-logs also writes the log to stderr; --log-level DEBUG|INFO|WARN|ERROR.\n` +
+    `The log is kept in ${LOG_FILE}.`,
+);
+
+try {
+  const argv = extractLogFlags(process.argv);
+  program.parseAsync(normalizeArgv(argv)).catch(fail);
+} catch (error) {
+  fail(error);
+}
+
+function fail(error: unknown): never {
   process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exit(1);
-});
+}
 
 /**
  * Loads the `.env` that sits next to this package (not the caller's cwd, so

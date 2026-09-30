@@ -14,6 +14,30 @@ function paint(open: string, close: string): (text: string) => string {
   return (text) => (COLOR ? `\x1b[${open}m${text}\x1b[${close}m` : text);
 }
 
+/** `/theme`: colors of the accent and of the input panel. mono uses no 256-color codes. */
+export const THEMES = {
+  dark: { accent: '38;5;141', panel: '48;5;235', panelEdge: '38;5;235' },
+  light: { accent: '38;5;91', panel: '48;5;254', panelEdge: '38;5;254' },
+  mono: { accent: '1', panel: '7', panelEdge: '2' },
+} as const;
+
+export type ThemeName = keyof typeof THEMES;
+
+let theme: ThemeName = 'dark';
+
+export function setTheme(name: ThemeName): void {
+  theme = name;
+}
+
+export function currentTheme(): ThemeName {
+  return theme;
+}
+
+/** A style that follows the current theme. */
+function themed(part: keyof (typeof THEMES)['dark'], close: string): (text: string) => string {
+  return (text) => (COLOR ? `\x1b[${THEMES[theme][part]}m${text}\x1b[${close}m` : text);
+}
+
 export const style = {
   bold: paint('1', '22'),
   italic: paint('3', '23'),
@@ -25,11 +49,11 @@ export const style = {
   gray: paint('90', '39'),
   white: paint('97', '39'),
   /** aiolah brand accent. */
-  accent: paint('38;5;141', '39'),
+  accent: themed('accent', '22;39'),
   /** Background of the input box and user messages. */
-  panel: paint('48;5;235', '49'),
+  panel: themed('panel', '27;49'),
   /** Foreground in the panel color, for the half-block bottom edge. */
-  panelEdge: paint('38;5;235', '39'),
+  panelEdge: themed('panelEdge', '22;39'),
   /** Custom 256-color foreground. */
   fg: (color: number, text: string) => (COLOR ? `\x1b[38;5;${color}m${text}\x1b[39m` : text),
 };

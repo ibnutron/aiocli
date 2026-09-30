@@ -5,6 +5,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { packageVersion } from '../version.js';
+import { log } from '../log.js';
 import { expandConfig, isRemoteServer, type McpServerConfig, type McpServerEntry } from './config.js';
 
 export type McpServerState = 'connected' | 'failed' | 'pending' | 'rejected';
@@ -152,11 +153,13 @@ export class McpManager {
       }
       this.connected.set(entry.name, { client, tools });
       status.state = 'connected';
+      log('INFO', 'mcp server connected', { server: entry.name, tools: tools.size });
       status.tools = [...tools.values()];
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const logLine = stderrTail.trim().split('\n').pop();
       status.error = logLine && !message.includes(logLine) ? `${message} — ${logLine}` : message;
+      log('WARN', 'mcp server failed', { server: entry.name, error: status.error });
       await client.close().catch(() => undefined);
     }
   }

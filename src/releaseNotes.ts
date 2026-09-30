@@ -8,6 +8,7 @@ export const RELEASE_NOTES: { version: string; changes: string[] }[] = [
       'Plan mode (/plan), /permissions allow/deny rules, /add-dir and --add-dir',
       'Custom commands and skills (.aiolah/commands, .aiolah/skills, .claude/…); /review, /security-review, /simplify',
       'Subagents (task tool, /agents, .aiolah/agents) and hooks from settings.json (Claude Code format)',
+      'aiolah acp for editors such as Zed; /theme, /vim, /statusline, /keybindings; --print-logs and --log-level',
       '/remote-control inside chat; /btw, /rename, /diff, /copy, /export, /cost, /usage, /release-notes',
       'Logins expire unless used (as in Claude Code); aiolah setup-token and AIOLAH_TOKEN for CI',
       'Leaving chat prints how to resume; aiolah -r <id> / -c work without "chat"',

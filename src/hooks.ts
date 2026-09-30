@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { log } from './log.js';
 
 /**
  * Hooks in Claude Code's settings format, so existing ones work:
@@ -163,6 +164,7 @@ export async function runHooks(
   const input = JSON.stringify({ hook_event_name: event, cwd: resolve(workspaceRoot), ...payload });
   for (const hook of hooks) {
     const { code, stdout, stderr } = await runCommand(hook.command, input, resolve(workspaceRoot), hook.timeoutMs);
+    log(code === 0 ? 'DEBUG' : 'INFO', 'hook ran', { event, command: hook.command, exit: code });
     if (code === 2) {
       result.blocked = true;
       result.reason = [result.reason, stderr.trim() || `blocked by hook: ${hook.command}`].filter(Boolean).join('\n');

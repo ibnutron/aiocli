@@ -120,6 +120,30 @@ context. Matchers are regular expressions over aiolah's tool names and Claude
 Code's (`Bash`, `Edit`, `Write`, `Read`). Project hooks run commands from the
 repo, so only use them in folders you trust. `/hooks` lists them.
 
+**Look and feel.** `/theme` switches between `dark`, `light` and `mono`
+colors; `/vim` turns on vim editing in the input box (Esc for normal mode,
+`h l w b e 0 $ x dd D C i a A I`, `j`/`k` for history, Enter sends);
+`/statusline <command>` shows the first line of a command's output under the
+box — it gets the session as JSON on stdin (model, workspace, permission mode,
+context size), as Claude Code's status line does; `/keybindings` lists the
+shortcuts. These are saved in `~/.aiolah/settings.json`.
+
+**In your editor (ACP).** `aiolah acp` speaks the
+[Agent Client Protocol](https://agentclientprotocol.com) over stdio, so editors
+such as Zed can use aiolah as their agent — with your login or provider, your
+instruction files, MCP servers (plus the editor's), permission modes (chosen in
+the editor) and Allow/Deny questions in the editor. For Zed, add to
+`~/.config/zed/settings.json`:
+
+```json
+{ "agent_servers": { "aiolah": { "type": "custom", "command": "aiolah", "args": ["acp"], "env": {} } } }
+```
+
+**Logs.** Every command writes a log to `~/.aiolah/logs/aiolah.log` (model
+requests with timings, tool calls, hooks, MCP and relay events).
+`--print-logs` also prints it to stderr and `--log-level DEBUG|INFO|WARN|ERROR`
+changes how much is written (also `AIOLAH_LOG_LEVEL`).
+
 **Checkpoints.** Every prompt is a checkpoint. `/rewind` goes back to one:
 undo the file changes made since then (by `write_file` / `edit_file`, not by
 shell commands), the conversation, or both. `/fork` continues in a copy of the
@@ -287,6 +311,10 @@ Inside `aiolah chat`, type `/` commands:
 | `/review`, `/security-review`, `/simplify` | Built-in prompts for the pending changes. |
 | `/<your-command>` | Custom commands and skills from `.aiolah/commands`, `.aiolah/skills` (and `.claude/…`). |
 | `/agents [new <name>]` | List the subagents, or create one. |
+| `/theme [dark\|light\|mono]` | Colors of the chat. |
+| `/vim` | Toggle vim editing in the input box. |
+| `/statusline [command\|off]` | A command whose output is shown under the input box. |
+| `/keybindings` | Keyboard shortcuts. |
 | `/hooks` | List the hooks from settings.json. |
 | `/release-notes` | What changed in each version. |
 | `/diff [full]` | What changed in the workspace (git status and diff). |
@@ -422,6 +450,7 @@ Every command accepts `-h, --help`.
 | `aiolah run [prompt...]` / `aiolah -p "<prompt>"` | Non-interactive: answer one prompt and exit (`--output-format text\|json`). |
 | `aiolah remote-control [name]` / `aiolah rc [name]` | Control this folder from aiolah (`-n, --name <name>`). |
 | `aiolah serve` | Same as `rc` when signed in; with `--port` it runs in direct mode (see below). |
+| `aiolah acp` | Run as an Agent Client Protocol agent over stdio (Zed and other editors). |
 | `aiolah attach <address>` | Join a direct-mode `serve` session from another machine. |
 | `aiolah sessions list` | List saved sessions. |
 | `aiolah mcp list` | List MCP servers for this folder and check that they start. |

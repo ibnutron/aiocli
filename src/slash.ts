@@ -27,6 +27,9 @@ import { expandCommand, loadCustomCommands, type CustomCommand } from './customC
 import { RELEASE_NOTES } from './releaseNotes.js';
 import { agentTemplate, loadAgents } from './agents.js';
 import { loadHooks } from './hooks.js';
+import { readUserSettings, settingsFilePath, writeUserSetting } from './settings.js';
+import { THEMES, currentTheme, setTheme, type ThemeName } from './ui.js';
+import { LOG_FILE } from './log.js';
 
 export interface SlashCommand {
   name: string;
@@ -57,6 +60,10 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: 'release-notes', description: 'What changed in each aiolah version' },
   { name: 'agents', args: '[new <name>]', description: 'Subagents the agent can start (task tool); create one' },
   { name: 'hooks', description: 'Hooks from settings.json that run on tool calls and prompts' },
+  { name: 'theme', args: '[dark|light|mono]', description: 'Colors of the chat' },
+  { name: 'vim', description: 'Toggle vim editing mode in the input box' },
+  { name: 'statusline', args: '[command|off]', description: 'A command whose output is shown under the input box' },
+  { name: 'keybindings', description: 'Keyboard shortcuts of the chat' },
   { name: 'diff', args: '[full]', description: 'Show what changed in the workspace (git)' },
   { name: 'copy', args: '[N]', description: "Copy the assistant's last (or Nth-last) answer" },
   { name: 'export', args: '[file]', description: 'Save the conversation as a Markdown file' },
@@ -145,6 +152,8 @@ export interface SlashContext {
   runPrompt?: (prompt: string, label: string) => Promise<void>;
   /** Opens a file in the user's editor (/memory edit). */
   editFile?: (path: string, template: string) => void;
+  /** Parts of the chat screen that /vim and /statusline change. */
+  ui?: { setVim: (enabled: boolean) => void; refreshStatusLine: () => Promise<void> };
   /** The chat's permission mode (/plan switches it). */
   permissionMode?: { get: () => PermissionMode; set: (mode: PermissionMode) => void };
 }
@@ -427,6 +436,81 @@ export async function handleSlash(line: string, context: SlashContext): Promise<
         );
         return 'handled';
       }
+
+      case 'theme': {
+        const names = Object.keys(THEMES) as ThemeName[];
+        const chosen =
+          arg && names.includes(arg as ThemeName)
+            ? (arg as ThemeName)
+            : ((await context.pick({
+                title: 'Theme',
+                sections: [
+                  {
+                    items: names.map((name) => ({ label: name, value: name, current: name === currentTheme() })),
+                  },
+                ],
+              })) as ThemeName | null);
+        if (chosen) {
+          setTheme(chosen);
+          writeUserSetting('theme', chosen);
+          print(style.gray(`  Theme: ${chosen} (saved in ${tildify(settingsFilePath())}).`));
+        }
+        return 'handled';
+      }
+
+      case 'vim': {
+        const enabled = !readUserSettings().vim;
+        writeUserSetting('vim', enabled);
+        context.ui?.setVim(enabled);
+        print(
+          style.gray(
+            enabled
+              ? '  Vim mode on: Esc for normal mode (h l w b e 0 $ x dd D C i a A I, j/k history), Enter sends.'
+              : '  Vim mode off.',
+          ),
+        );
+        return 'handled';
+      }
+
+      case 'statusline': {
+        if (!arg) {
+          const current = readUserSettings().statusLine?.command;
+          print(
+            style.gray(
+              current
+                ? `  Status line: ${current}\n  It gets the session as JSON on stdin ` +
+                    '(model, workspace, permission_mode, context_tokens…); /statusline off removes it.'
+                : '  No status line. Example: /statusline echo "$(git branch --show-current) · $(date +%H:%M)"',
+            ),
+          );
+          return 'handled';
+        }
+        writeUserSetting('statusLine', arg === 'off' ? undefined : { type: 'command', command: arg });
+        await context.ui?.refreshStatusLine();
+        print(style.gray(arg === 'off' ? '  Status line removed.' : '  Status line set.'));
+        return 'handled';
+      }
+
+      case 'keybindings':
+        print(
+          [
+            ...[
+              ['enter', 'send (while a turn runs: queue)'],
+              ['\\ enter, alt+enter', 'new line'],
+              ['esc', 'interrupt the running turn · close menus · vim normal mode'],
+              ['shift+tab', 'cycle permission mode'],
+              ['ctrl+c', 'clear input · twice to quit'],
+              ['ctrl+d', 'quit (empty input)'],
+              ['↑ ↓', 'input history · menu selection'],
+              ['tab', 'complete a / command'],
+              ['ctrl+a / ctrl+e', 'start / end of line'],
+              ['ctrl+w, alt+backspace', 'delete the previous word'],
+              ['ctrl+u / ctrl+k', 'delete to the start / end of the line'],
+            ].map(([keys, action]) => `  ${style.bold(keys!.padEnd(24))}${style.gray(action!)}`),
+            style.gray(`  /vim adds vim editing. Shortcuts cannot be remapped yet. Log: ${tildify(LOG_FILE)}`),
+          ].join('\n'),
+        );
+        return 'handled';
 
       case 'release-notes':
         print(

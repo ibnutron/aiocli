@@ -9,6 +9,9 @@ import { SessionSync } from '../sessionSync.js';
 import { ChatRemote } from '../remoteChat.js';
 import { readAuth } from '../config.js';
 import { checkLogin, loginNotice } from '../loginStatus.js';
+import { readUserSettings } from '../settings.js';
+import { runStatusLine } from '../statusLine.js';
+import { setTheme } from '../ui.js';
 import type { ImageInput } from '../protocol.js';
 import { findLatestSession } from '../persistence.js';
 import { ensureTrusted } from '../trust.js';
@@ -55,6 +58,12 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
   let chat: ChatSession | undefined;
   /** Set by /remote-control; shares this chat with /code. */
   let remote: ChatRemote | undefined;
+  /** Last output of the /statusline command. */
+  let statusLineText = '';
+  const startSettings = readUserSettings();
+  if (startSettings.theme) {
+    setTheme(startSettings.theme);
+  }
 
   const box = new TerminalInput(
     rl,
@@ -72,8 +81,11 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
       workspace: workspaceRoot,
       version: packageVersion(),
       remote: remote?.active ?? false,
+      statusLine: statusLineText,
     }),
   );
+  const settings = readUserSettings();
+  box.setVim(settings.vim === true);
 
   // Only reached when the permission mode wants a human answer (see ChatSession).
   // With /remote-control on, /code clients are asked too and the first answer wins.
@@ -146,6 +158,32 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
     box.print(style.yellow(`${' '.repeat(CONTENT_INDENT)}${message}`));
   });
   const sync = SessionSync.attach(session, { origin: 'terminal' });
+
+  /** Re-runs the /statusline command (after each turn and when something it shows changes). */
+  async function refreshStatusLine(): Promise<void> {
+    const command = readUserSettings().statusLine?.command;
+    if (!command) {
+      statusLineText = '';
+      box.refresh();
+      return;
+    }
+    const line = await runStatusLine(command, {
+      session_id: session.sessionId,
+      model: { id: session.modelId, display_name: session.modelId },
+      provider: session.providerId,
+      workspace: { current_dir: workspaceRoot, project_dir: workspaceRoot },
+      version: packageVersion(),
+      permission_mode: permissionMode,
+      context_tokens: session.contextTokens,
+    });
+    if (line !== null) {
+      statusLineText = line;
+      box.refresh();
+    }
+  }
+  session.on('turn_end', () => void refreshStatusLine());
+  session.on('session_changed', () => void refreshStatusLine());
+  void refreshStatusLine();
   await session.startSession(resumeId ? 'resume' : 'startup');
 
   /** One turn with the chat's output: the prompt, tool lines, the answer and the footer. */
@@ -315,6 +353,10 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
             await runTurn(prompt, 'terminal', [], label);
           },
           editFile,
+          ui: {
+            setVim: (enabled) => box.setVim(enabled),
+            refreshStatusLine,
+          },
           permissionMode: {
             get: () => permissionMode,
             set: (mode) => {
