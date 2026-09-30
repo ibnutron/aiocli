@@ -6,9 +6,11 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { packageVersion } from '../version.js';
 import { log } from '../log.js';
+import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
+import { StoredOAuthProvider } from './oauth.js';
 import { expandConfig, isRemoteServer, type McpServerConfig, type McpServerEntry } from './config.js';
 
-export type McpServerState = 'connected' | 'failed' | 'pending' | 'rejected';
+export type McpServerState = 'connected' | 'failed' | 'pending' | 'rejected' | 'needs_auth';
 
 /** A server as `/mcp` and `aiolah mcp list` show it. */
 export interface McpServerStatus {
@@ -118,7 +120,7 @@ export class McpManager {
     let stderrTail = '';
     const client = new Client({ name: 'aiolah', version: packageVersion() });
     try {
-      const transport = this.transportFor(expandConfig(entry.config));
+      const transport = this.transportFor(expandConfig(entry.config), entry.name);
       if (transport instanceof StdioClientTransport) {
         // Server logs would draw over the chat box; keep the end for error messages.
         transport.stderr?.on('data', (chunk: Buffer) => {
@@ -156,6 +158,14 @@ export class McpManager {
       log('INFO', 'mcp server connected', { server: entry.name, tools: tools.size });
       status.tools = [...tools.values()];
     } catch (error) {
+      if (error instanceof UnauthorizedError) {
+        // A remote server that wants a sign-in (OAuth) aiolah does not have yet, or that expired.
+        status.state = 'needs_auth';
+        status.error = `sign in with: aiolah mcp auth ${entry.name}`;
+        log('INFO', 'mcp server needs sign-in', { server: entry.name });
+        await client.close().catch(() => undefined);
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       const logLine = stderrTail.trim().split('\n').pop();
       status.error = logLine && !message.includes(logLine) ? `${message} — ${logLine}` : message;
@@ -164,13 +174,15 @@ export class McpManager {
     }
   }
 
-  private transportFor(config: McpServerConfig): Transport {
+  private transportFor(config: McpServerConfig, name: string): Transport {
     if (isRemoteServer(config)) {
       const url = new URL(config.url);
       const requestInit = config.headers ? { headers: config.headers } : undefined;
+      // Servers that need an OAuth sign-in use the tokens from `aiolah mcp auth`.
+      const authProvider = new StoredOAuthProvider(name, config.url);
       return config.type === 'http'
-        ? new StreamableHTTPClientTransport(url, { requestInit })
-        : new SSEClientTransport(url, { requestInit });
+        ? new StreamableHTTPClientTransport(url, { requestInit, authProvider })
+        : new SSEClientTransport(url, { requestInit, authProvider });
     }
     return new StdioClientTransport({
       command: config.command,

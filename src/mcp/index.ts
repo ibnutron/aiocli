@@ -92,10 +92,12 @@ function askAboutServer(entry: McpServerEntry): Promise<number | null> {
 /** Notice when a server failed to start, or null. */
 export function mcpSummary(manager: McpManager): string | null {
   const failed = manager.status.filter((server) => server.state === 'failed');
-  if (!failed.length) {
-    return null;
-  }
-  return `MCP: ${failed.map((server) => server.name).join(', ')} failed to start — see /mcp`;
+  const signIn = manager.status.filter((server) => server.state === 'needs_auth');
+  const parts = [
+    failed.length ? `${failed.map((server) => server.name).join(', ')} failed to start` : '',
+    signIn.length ? `${signIn.map((server) => server.name).join(', ')} need sign-in (aiolah mcp auth <name>)` : '',
+  ].filter(Boolean);
+  return parts.length ? `MCP: ${parts.join('; ')} — see /mcp` : null;
 }
 
 const STATE_LABEL: Record<McpServerStatus['state'], (text: string) => string> = {
@@ -103,6 +105,7 @@ const STATE_LABEL: Record<McpServerStatus['state'], (text: string) => string> = 
   failed: style.red,
   pending: style.yellow,
   rejected: style.gray,
+  needs_auth: style.yellow,
 };
 
 const STATE_TEXT: Record<McpServerStatus['state'], string> = {
@@ -110,6 +113,7 @@ const STATE_TEXT: Record<McpServerStatus['state'], string> = {
   failed: '✘ failed',
   pending: '… not approved yet (asked on the next interactive start)',
   rejected: '– not used (you chose to continue without it)',
+  needs_auth: '! needs sign-in',
 };
 
 /** Server list for `/mcp` and `aiolah mcp list`. */

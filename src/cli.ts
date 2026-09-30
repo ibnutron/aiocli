@@ -17,7 +17,15 @@ import { runCommand } from './commands/run.js';
 import { upgradeCommand } from './commands/upgrade.js';
 import { acpCommand } from './commands/acp.js';
 import { doctorCommand } from './commands/doctor.js';
-import { collect, mcpAddCommand, mcpListCommand, mcpRemoveCommand, mcpResetCommand } from './commands/mcp.js';
+import {
+  collect,
+  mcpAddCommand,
+  mcpAuthCommand,
+  mcpListCommand,
+  mcpLogoutCommand,
+  mcpRemoveCommand,
+  mcpResetCommand,
+} from './commands/mcp.js';
 import { packageVersion } from './version.js';
 import { LOG_FILE, extractLogFlags } from './log.js';
 import { addPermissionOptions } from './permissions.js';
@@ -221,6 +229,19 @@ mcp
   .option('-s, --scope <scope>', 'local, project or user')
   .option('-w, --workspace <dir>', 'project folder', '.')
   .action(mcpRemoveCommand);
+mcp
+  .command('auth')
+  .description('Sign in to a remote MCP server that uses OAuth (opens your browser)')
+  .argument('<name>', 'server name')
+  .option('--no-browser', 'only print the sign-in URL')
+  .option('-w, --workspace <dir>', 'project folder', '.')
+  .action(mcpAuthCommand);
+mcp
+  .command('logout')
+  .description("Forget a remote MCP server's OAuth sign-in")
+  .argument('<name>', 'server name')
+  .option('-w, --workspace <dir>', 'project folder', '.')
+  .action(mcpLogoutCommand);
 mcp
   .command('reset-project-choices')
   .description("Forget which of this folder's .mcp.json servers you allowed or declined")

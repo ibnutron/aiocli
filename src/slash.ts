@@ -30,6 +30,9 @@ import { loadHooks } from './hooks.js';
 import { readUserSettings, settingsFilePath, writeUserSetting } from './settings.js';
 import { THEMES, currentTheme, setTheme, type ThemeName } from './ui.js';
 import { LOG_FILE } from './log.js';
+import { KEYBINDINGS_FILE, KEYBINDINGS_TEMPLATE, Keymap, SUPPORTED_ACTIONS } from './keybindings.js';
+import type { BackgroundTask, BackgroundTasks } from './backgroundTasks.js';
+import { DEFAULT_LOOP_INTERVAL_MS, defaultLoopPrompt, formatInterval, parseInterval, type LoopRunner } from './loop.js';
 
 export interface SlashCommand {
   name: string;
@@ -63,7 +66,20 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: 'theme', args: '[dark|light|mono]', description: 'Colors of the chat' },
   { name: 'vim', description: 'Toggle vim editing mode in the input box' },
   { name: 'statusline', args: '[command|off]', description: 'A command whose output is shown under the input box' },
-  { name: 'keybindings', description: 'Keyboard shortcuts of the chat' },
+  { name: 'keybindings', args: '[edit]', description: 'Keyboard shortcuts; edit opens keybindings.json' },
+  {
+    name: 'loop',
+    args: '[interval] [prompt|stop]',
+    description: 'Run a prompt repeatedly, e.g. /loop 5m check the deploy',
+  },
+  {
+    name: 'background',
+    args: '<prompt>',
+    description: 'Run a prompt in a copy of this conversation, in the background',
+  },
+  { name: 'tasks', args: '[id|stop <id>]', description: 'Background tasks: status and results' },
+  { name: 'proactive', args: '[interval] [prompt]', description: 'Same as /loop', hidden: true },
+  { name: 'bg', args: '<prompt>', description: 'Same as /background', hidden: true },
   { name: 'diff', args: '[full]', description: 'Show what changed in the workspace (git)' },
   { name: 'copy', args: '[N]', description: "Copy the assistant's last (or Nth-last) answer" },
   { name: 'export', args: '[file]', description: 'Save the conversation as a Markdown file' },
@@ -152,6 +168,14 @@ export interface SlashContext {
   runPrompt?: (prompt: string, label: string) => Promise<void>;
   /** Opens a file in the user's editor (/memory edit). */
   editFile?: (path: string, template: string) => void;
+  /** `/background` and `/tasks`. */
+  background?: { tasks: BackgroundTasks; start: (prompt: string) => BackgroundTask };
+  /** `/loop`. */
+  loop?: {
+    runner: LoopRunner;
+    start: (intervalMs: number, prompt: string, label: string) => void;
+    stop: () => boolean;
+  };
   /** Parts of the chat screen that /vim and /statusline change. */
   ui?: { setVim: (enabled: boolean) => void; refreshStatusLine: () => Promise<void> };
   /** The chat's permission mode (/plan switches it). */
@@ -491,7 +515,14 @@ export async function handleSlash(line: string, context: SlashContext): Promise<
         return 'handled';
       }
 
-      case 'keybindings':
+      case 'keybindings': {
+        if (arg === 'edit') {
+          context.editFile?.(KEYBINDINGS_FILE, KEYBINDINGS_TEMPLATE);
+          print(style.gray(`  Saved changes to ${tildify(KEYBINDINGS_FILE)} apply right away.`));
+          return 'handled';
+        }
+        const keymap = new Keymap();
+        const custom = keymap.bindings();
         print(
           [
             ...[
@@ -507,10 +538,133 @@ export async function handleSlash(line: string, context: SlashContext): Promise<
               ['ctrl+w, alt+backspace', 'delete the previous word'],
               ['ctrl+u / ctrl+k', 'delete to the start / end of the line'],
             ].map(([keys, action]) => `  ${style.bold(keys!.padEnd(24))}${style.gray(action!)}`),
-            style.gray(`  /vim adds vim editing. Shortcuts cannot be remapped yet. Log: ${tildify(LOG_FILE)}`),
+            ...(custom.length
+              ? [
+                  style.bold(`  Custom (${tildify(keymap.source ?? KEYBINDINGS_FILE)})`),
+                  ...custom.map(
+                    (binding) =>
+                      `  ${style.bold(binding.keys.padEnd(24))}${style.gray(`${binding.context} · `)}` +
+                      (binding.action ?? style.gray('unbound')),
+                  ),
+                ]
+              : []),
+            style.gray(
+              `  /keybindings edit opens ${tildify(KEYBINDINGS_FILE)} (Claude Code's format). ` +
+                `Actions: ${Object.keys(SUPPORTED_ACTIONS).join(', ')}. ` +
+                `/vim adds vim editing. Log: ${tildify(LOG_FILE)}`,
+            ),
           ].join('\n'),
         );
         return 'handled';
+      }
+
+      case 'loop':
+      case 'proactive': {
+        if (!context.loop) {
+          print(style.yellow('  /loop is only available in aiolah chat.'));
+          return 'handled';
+        }
+        if (arg === 'stop' || arg === 'off') {
+          print(style.gray(context.loop.stop() ? '  Loop stopped.' : '  No loop is running.'));
+          return 'handled';
+        }
+        if (!session.modelId) {
+          print(style.yellow('  Choose a model first: /models'));
+          return 'handled';
+        }
+        const intervalMs = parseInterval(args[0]);
+        const promptText = (intervalMs ? args.slice(1) : args).join(' ').trim();
+        const prompt = promptText || defaultLoopPrompt(session.workspace);
+        const every = intervalMs ?? DEFAULT_LOOP_INTERVAL_MS;
+        const label = promptText ? promptText.slice(0, 50) : 'maintenance';
+        print(
+          style.gray(`  Running every ${formatInterval(every)} while this chat is open: ${label}. /loop stop ends it.`),
+        );
+        context.loop.start(every, prompt, label);
+        return 'handled';
+      }
+
+      case 'background':
+      case 'bg': {
+        if (!context.background) {
+          print(style.yellow('  /background is only available in aiolah chat.'));
+          return 'handled';
+        }
+        if (!arg) {
+          print(style.yellow('  Usage: /background <prompt>'));
+          return 'handled';
+        }
+        if (!session.modelId) {
+          print(style.yellow('  Choose a model first: /models'));
+          return 'handled';
+        }
+        const task = context.background.start(arg);
+        print(
+          style.gray(
+            `  Background task #${task.id} started in a copy of this conversation. ` +
+              'Actions that need your approval are refused there (use /permissions or the mode to allow them). ' +
+              '/tasks shows it.',
+          ),
+        );
+        return 'handled';
+      }
+
+      case 'tasks': {
+        const tasks = context.background?.tasks;
+        if (!tasks) {
+          print(style.yellow('  /tasks is only available in aiolah chat.'));
+          return 'handled';
+        }
+        if (args[0] === 'stop') {
+          print(
+            style.gray(
+              tasks.stop(Number(args[1]))
+                ? `  Stopping task #${args[1]}.`
+                : `  Task #${args[1] ?? '?'} is not running.`,
+            ),
+          );
+          return 'handled';
+        }
+        if (args[0]) {
+          const task = tasks.get(Number(args[0]));
+          if (!task) {
+            print(style.yellow(`  No task #${args[0]}.`));
+            return 'handled';
+          }
+          print(
+            [
+              `  ${style.bold(`#${task.id}`)} ${task.status} · ${task.prompt}`,
+              ...(task.denied.length
+                ? [
+                    style.yellow(
+                      `  Refused (needed approval): ${task.denied.map((item) => item.slice(0, 60)).join('; ')}`,
+                    ),
+                  ]
+                : []),
+              task.result ? `${task.result.replace(/^/gm, '  ')}` : style.gray('  Still running…'),
+              style.gray(
+                `  Its conversation is saved as ${task.session.sessionId} (aiolah -r ${task.session.sessionId}).`,
+              ),
+            ].join('\n'),
+          );
+          return 'handled';
+        }
+        const list = tasks.list();
+        print(
+          list.length
+            ? list
+                .map((task) => {
+                  const seconds = Math.round(
+                    ((task.finishedAt ?? new Date()).getTime() - task.startedAt.getTime()) / 1000,
+                  );
+                  const age = style.gray(`${seconds}s`);
+                  return `  ${style.accent(`#${task.id}`)} ${task.status.padEnd(8)} ${age} ${task.prompt.slice(0, 70)}`;
+                })
+                .join('\n') + style.gray('\n  /tasks <id> shows a result · /tasks stop <id>')
+            : style.gray('  No background tasks. /background <prompt> starts one.'),
+        );
+        return 'handled';
+      }
 
       case 'release-notes':
         print(

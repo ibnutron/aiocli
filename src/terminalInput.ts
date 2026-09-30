@@ -2,6 +2,7 @@ import type { Interface } from 'node:readline/promises';
 import { stdout } from 'node:process';
 import { ask, pick as pickFromList } from './prompt.js';
 import { matchSlashCommands, type SlashCommand } from './slash.js';
+import { Keymap, type KeyContext } from './keybindings.js';
 import {
   COLOR,
   MARGIN,
@@ -48,6 +49,8 @@ export interface TerminalInputHandlers {
   onInterrupt: () => void;
   /** Shift+Tab. */
   onCycleMode: () => void;
+  /** chat:externalEditor (keybindings.json): edit the input in $EDITOR; resolves to the new text. */
+  onExternalEditor?: (text: string) => Promise<string | null>;
 }
 
 export type ConfirmAnswer = 'yes' | 'always' | 'no';
@@ -136,6 +139,8 @@ export class TerminalInput {
 
   private buffer = '';
   private cursor = 0;
+  /** Shortcuts from keybindings.json. */
+  private readonly keymap = new Keymap();
   /** /vim: Esc switches to normal mode, i/a/A/I back to insert. */
   private vimEnabled = false;
   private vimNormal = false;
@@ -567,6 +572,16 @@ export class TerminalInput {
       this.mouseReport = '';
       return;
     }
+    if (!this.picking && !this.pasting) {
+      const context: KeyContext = this.pendingConfirm ? 'Confirmation' : this.menu.length ? 'Autocomplete' : 'Chat';
+      const action = this.keymap.resolve(context, sequence, key);
+      if (action !== undefined) {
+        if (typeof action === 'string' && action !== 'pending') {
+          this.runAction(action);
+        }
+        return;
+      }
+    }
     const typing = Date.now() - this.lastKeyAt < 400;
     this.lastKeyAt = Date.now();
 
@@ -704,6 +719,75 @@ export class TerminalInput {
             : null;
     if (answer) {
       this.answerConfirm(answer);
+    }
+  }
+
+  /** Runs a keybindings.json action. */
+  private runAction(action: string): void {
+    switch (action) {
+      case 'app:interrupt':
+        if (this.busy) this.handlers.onInterrupt();
+        return;
+      case 'app:redraw':
+      case 'chat:clearInput':
+        this.regionHeight = 0;
+        this.render();
+        return;
+      case 'chat:submit':
+        this.submit();
+        return;
+      case 'chat:newline':
+        this.insert('\n');
+        this.afterEdit();
+        return;
+      case 'chat:cancel':
+        this.setBuffer('');
+        this.afterEdit();
+        return;
+      case 'chat:cycleMode':
+        this.handlers.onCycleMode();
+        return;
+      case 'chat:modelPicker':
+        this.setBuffer('/models');
+        this.submit();
+        return;
+      case 'chat:externalEditor':
+        void this.handlers.onExternalEditor?.(this.buffer).then((text) => {
+          if (text !== null) {
+            this.setBuffer(text.replace(/\n+$/, ''));
+          }
+          this.afterEdit();
+        });
+        return;
+      case 'history:previous':
+        this.recall(1);
+        this.afterEdit();
+        return;
+      case 'history:next':
+        this.recall(-1);
+        this.afterEdit();
+        return;
+      case 'autocomplete:accept':
+        if (this.menu.length) this.runMenuItem(this.menu[this.selected]!);
+        return;
+      case 'autocomplete:dismiss':
+        this.menu = [];
+        this.render();
+        return;
+      case 'autocomplete:previous':
+      case 'autocomplete:next':
+        if (this.menu.length) {
+          const step = action === 'autocomplete:previous' ? -1 : 1;
+          this.selected = (this.selected + step + this.menu.length) % this.menu.length;
+          this.render();
+        }
+        return;
+      case 'confirm:yes':
+        this.answerConfirm('yes');
+        return;
+      case 'confirm:no':
+        this.answerConfirm('no');
+        return;
     }
   }
 

@@ -11,6 +11,11 @@ import {
   type McpServerConfig,
 } from '../mcp/config.js';
 import { formatMcpStatus, startMcp } from '../mcp/index.js';
+import { auth } from '@modelcontextprotocol/sdk/client/auth.js';
+import { expandConfig, isRemoteServer, readMcpServers } from '../mcp/config.js';
+import { StoredOAuthProvider, forgetOAuth, listenForAuthorizationCode } from '../mcp/oauth.js';
+import { McpManager } from '../mcp/manager.js';
+import { openBrowser } from './login.js';
 import { style } from '../ui.js';
 
 interface WorkspaceOptions {
@@ -134,4 +139,60 @@ export async function mcpRemoveCommand(name: string, options: RemoveOptions): Pr
 export async function mcpResetCommand(options: WorkspaceOptions): Promise<void> {
   saveProjectChoices(resolve(options.workspace), null);
   stdout.write('Project MCP server choices reset; you will be asked again on the next start.\n');
+}
+
+/** The remote server `name` visible from the workspace, with its URL filled in. */
+function remoteServer(workspaceRoot: string, name: string) {
+  const entry = readMcpServers(workspaceRoot).find((server) => server.name === name);
+  if (!entry) {
+    throw new Error(`No MCP server named "${name}" here (aiolah mcp list).`);
+  }
+  const config = expandConfig(entry.config);
+  if (!isRemoteServer(config)) {
+    throw new Error(`"${name}" is a local (stdio) server; only http/sse servers sign in with OAuth.`);
+  }
+  return { entry, url: config.url };
+}
+
+/**
+ * `aiolah mcp auth <name>`: signs in to a remote MCP server that uses OAuth
+ * (browser login, local callback, tokens kept in ~/.aiolah/mcp-oauth.json).
+ */
+export async function mcpAuthCommand(name: string, options: WorkspaceOptions & { browser?: boolean }): Promise<void> {
+  const workspaceRoot = resolve(options.workspace);
+  const { entry, url } = remoteServer(workspaceRoot, name);
+  const provider = new StoredOAuthProvider(name, url);
+  const callback = listenForAuthorizationCode();
+  try {
+    const first = await auth(provider, { serverUrl: url });
+    if (first === 'REDIRECT' && provider.authorizationUrl) {
+      const link = provider.authorizationUrl.toString();
+      stdout.write(`Sign in to ${name} in your browser:\n\n  ${link}\n\nWaiting for the browser… (Ctrl+C to cancel)\n`);
+      if (options.browser !== false) {
+        openBrowser(link);
+      }
+      const code = await callback.code;
+      const second = await auth(provider, { serverUrl: url, authorizationCode: code });
+      if (second !== 'AUTHORIZED') {
+        throw new Error('The server did not accept the sign-in.');
+      }
+    }
+  } finally {
+    callback.close();
+  }
+  const manager = new McpManager(workspaceRoot);
+  await manager.start([entry]);
+  const status = manager.status[0];
+  await manager.close();
+  stdout.write(
+    status?.state === 'connected'
+      ? `Signed in to ${style.bold(name)}: ${status.tools.length} tools available.\n`
+      : `Signed in, but ${name} did not connect: ${status?.error ?? 'unknown error'}\n`,
+  );
+}
+
+/** `aiolah mcp logout <name>`: forgets the server's OAuth tokens. */
+export async function mcpLogoutCommand(name: string, options: WorkspaceOptions): Promise<void> {
+  const { url } = remoteServer(resolve(options.workspace), name);
+  stdout.write(forgetOAuth(name, url) ? `Signed out of ${name}.\n` : `Not signed in to ${name}.\n`);
 }

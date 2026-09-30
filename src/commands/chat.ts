@@ -1,9 +1,9 @@
 import * as readline from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { hostname } from 'node:os';
-import { basename, dirname, resolve } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { hostname, tmpdir } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
 import { ChatSession, TurnInterruptedError, type PromptOrigin } from '../session.js';
 import { SessionSync } from '../sessionSync.js';
 import { ChatRemote } from '../remoteChat.js';
@@ -11,6 +11,8 @@ import { readAuth } from '../config.js';
 import { checkLogin, loginNotice } from '../loginStatus.js';
 import { readUserSettings } from '../settings.js';
 import { runStatusLine } from '../statusLine.js';
+import { BackgroundTasks } from '../backgroundTasks.js';
+import { LoopRunner, formatInterval } from '../loop.js';
 import { setTheme } from '../ui.js';
 import type { ImageInput } from '../protocol.js';
 import { findLatestSession } from '../persistence.js';
@@ -60,6 +62,8 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
   let remote: ChatRemote | undefined;
   /** Last output of the /statusline command. */
   let statusLineText = '';
+  const background = new BackgroundTasks();
+  const loop = new LoopRunner();
   const startSettings = readUserSettings();
   if (startSettings.theme) {
     setTheme(startSettings.theme);
@@ -73,6 +77,19 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
         permissionMode = nextPermissionMode(permissionMode);
         box.refresh();
       },
+      onExternalEditor: async (text) => {
+        // chat:externalEditor: edit the prompt in a temporary file.
+        const path = join(tmpdir(), `aiolah-prompt-${process.pid}.md`);
+        writeFileSync(path, text, 'utf8');
+        editFile(path, '');
+        try {
+          return readFileSync(path, 'utf8');
+        } catch {
+          return null;
+        } finally {
+          rmSync(path, { force: true });
+        }
+      },
     },
     () => ({
       mode: modeLabel(permissionMode),
@@ -81,7 +98,13 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
       workspace: workspaceRoot,
       version: packageVersion(),
       remote: remote?.active ?? false,
-      statusLine: statusLineText,
+      statusLine: [
+        statusLineText,
+        loop.current ? `loop ${formatInterval(loop.current.intervalMs)}` : '',
+        background.running ? `${background.running} in background (/tasks)` : '',
+      ]
+        .filter(Boolean)
+        .join(' · '),
     }),
   );
   const settings = readUserSettings();
@@ -272,6 +295,15 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
     }
   }
 
+  background.on('finished', (task: { id: number; status: string; prompt: string }) => {
+    const verb = task.status === 'done' ? 'finished' : task.status;
+    box.print(
+      style.gray(`${' '.repeat(CONTENT_INDENT)}Background task #${task.id} ${verb}: `) +
+        `${task.prompt.slice(0, 60)} ${style.gray(`· /tasks ${task.id}`)}`,
+    );
+    box.refresh();
+  });
+
   /** `/remote-control [name]`: share this chat with /code, or stop sharing it. */
   async function toggleRemote(name?: string): Promise<void> {
     if (remote?.active) {
@@ -357,6 +389,31 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
             setVim: (enabled) => box.setVim(enabled),
             refreshStatusLine,
           },
+          background: {
+            tasks: background,
+            start: (prompt) => {
+              const task = background.start(session, prompt, { mode: permissionMode, mcp });
+              box.refresh();
+              return task;
+            },
+          },
+          loop: {
+            runner: loop,
+            start: (intervalMs, prompt, label) => {
+              loop.start(intervalMs, prompt, (text, run) => {
+                // A loop tick waits its turn: skipped while the agent is still working.
+                if (!session.isRunning) {
+                  void runTurn(text, 'terminal', [], `/loop #${run} · ${label}`);
+                }
+              });
+              box.refresh();
+            },
+            stop: () => {
+              const stopped = loop.stop();
+              box.refresh();
+              return stopped;
+            },
+          },
           permissionMode: {
             get: () => permissionMode,
             set: (mode) => {
@@ -379,6 +436,10 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
     box.unmount();
     rl.close();
     remote?.stop();
+    loop.stop();
+    for (const task of background.list()) {
+      background.stop(task.id);
+    }
     await Promise.all([sync?.flush(), mcp.close()]);
     if (session.renderHistory().length) {
       stdout.write(`\nResume this session with:\naiolah --resume ${session.sessionId}\n\n`);

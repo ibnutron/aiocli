@@ -139,6 +139,30 @@ the editor) and Allow/Deny questions in the editor. For Zed, add to
 { "agent_servers": { "aiolah": { "type": "custom", "command": "aiolah", "args": ["acp"], "env": {} } } }
 ```
 
+**Running on its own.** `/loop [interval] [prompt]` repeats a prompt while the
+chat is open (`/loop 5m check if the deploy finished`; the interval is `30s`,
+`5m`, `1h`, 10 minutes when left out; without a prompt it runs `.aiolah/loop.md`
+or a built-in "continue the unfinished work" prompt; `/loop stop` ends it).
+`/background <prompt>` runs a prompt in a copy of the conversation while you keep
+chatting; actions that would need your approval are refused there, as in
+`aiolah -p`. `/tasks` lists them, `/tasks <id>` shows a result and
+`/tasks stop <id>` stops one.
+
+**Shortcuts.** `/keybindings edit` opens `~/.aiolah/keybindings.json` (Claude
+Code's format — aiolah also reads `~/.claude/keybindings.json` when it has none
+of its own):
+
+```json
+{ "bindings": [{ "context": "Chat", "bindings": { "ctrl+g": "chat:externalEditor", "ctrl+x ctrl+k": "chat:modelPicker", "ctrl+s": null } }] }
+```
+
+Contexts `Global`, `Chat`, `Autocomplete` and `Confirmation`; actions such as
+`chat:submit`, `chat:newline`, `chat:cancel`, `chat:cycleMode`,
+`chat:externalEditor`, `chat:modelPicker`, `history:previous`,
+`autocomplete:accept` and `confirm:yes` (`/keybindings` lists them all); `null`
+unbinds a key; chords are typed within 3 seconds; Ctrl+C and Ctrl+D can't be
+rebound. Changes apply without a restart.
+
 **Logs.** Every command writes a log to `~/.aiolah/logs/aiolah.log` (model
 requests with timings, tool calls, hooks, MCP and relay events).
 `--print-logs` also prints it to stderr and `--log-level DEBUG|INFO|WARN|ERROR`
@@ -314,7 +338,10 @@ Inside `aiolah chat`, type `/` commands:
 | `/theme [dark\|light\|mono]` | Colors of the chat. |
 | `/vim` | Toggle vim editing in the input box. |
 | `/statusline [command\|off]` | A command whose output is shown under the input box. |
-| `/keybindings` | Keyboard shortcuts. |
+| `/keybindings [edit]` | Keyboard shortcuts; `edit` opens keybindings.json. |
+| `/loop [interval] [prompt\|stop]` | Repeat a prompt while the chat is open. Alias: `/proactive`. |
+| `/background <prompt>` | Run a prompt in a copy of the conversation in the background. Alias: `/bg`. |
+| `/tasks [id\|stop <id>]` | Background tasks: status and results. |
 | `/hooks` | List the hooks from settings.json. |
 | `/release-notes` | What changed in each version. |
 | `/diff [full]` | What changed in the workspace (git status and diff). |
@@ -431,7 +458,12 @@ terminal (`aiolah -p`, CI) only servers you already approved start.
 `aiolah mcp reset-project-choices` forgets the answers for a folder. In chat,
 `/mcp` shows which servers are connected and why one failed. Servers run in the
 workspace folder; their log output is kept out of the chat and shown when they
-fail to start. Only headers are supported for remote servers (no OAuth sign-in).
+fail to start. Remote servers that use OAuth show `needs sign-in`: `aiolah mcp auth <name>`
+opens the login in your browser (a local callback on port 19876 receives it;
+`AIOLAH_MCP_OAUTH_PORT` changes it) and keeps the tokens in
+`~/.aiolah/mcp-oauth.json`; they are refreshed automatically, and
+`aiolah mcp logout <name>` forgets them. Servers that take a token in a header
+work with `-H` as well.
 
 ## Command reference
 
@@ -455,6 +487,7 @@ Every command accepts `-h, --help`.
 | `aiolah sessions list` | List saved sessions. |
 | `aiolah mcp list` | List MCP servers for this folder and check that they start. |
 | `aiolah mcp add <name> -- <command> [args…]` | Add a stdio MCP server (`-s local\|project\|user`, `-e KEY=value`); `-t http\|sse <name> <url>` with `-H "Name: value"` for a remote one. |
+| `aiolah mcp auth <name>` / `aiolah mcp logout <name>` | Sign in to (or out of) a remote MCP server that uses OAuth. |
 | `aiolah mcp remove <name>` | Remove an MCP server (`-s <scope>` for one scope only). |
 | `aiolah mcp reset-project-choices` | Ask again about this folder's `.mcp.json` servers. |
 | `aiolah --version` | Print the installed version. Alias: `-v`. |

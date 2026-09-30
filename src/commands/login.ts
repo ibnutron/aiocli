@@ -164,7 +164,7 @@ export async function statusCommand(): Promise<void> {
   );
 }
 
-function openBrowser(url: string): void {
+export function openBrowser(url: string): void {
   const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer.exe' : 'xdg-open';
   try {
     const child = spawn(command, [url], { detached: true, stdio: 'ignore' });
