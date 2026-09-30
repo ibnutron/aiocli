@@ -370,23 +370,33 @@ export function turnFooter(mode: string, model: string, milliseconds: number, fa
   )}`;
 }
 
-/** 4-row block letters for the home-screen wordmark. */
-const GLYPHS: Record<string, string[]> = {
-  a: ['    ', '▀▀▀█', '█▀▀█', '▀▀▀▀'],
-  i: ['▄', '▄', '█', '▀'],
-  o: ['    ', '█▀▀█', '█  █', '▀▀▀▀'],
-  l: ['█', '█', '█', '▀'],
-  h: ['█   ', '█▀▀█', '█  █', '▀  ▀'],
-};
+/**
+ * The aiolah mark (the favicon's outlined "A" and "I"), drawn in quadrant
+ * blocks from its SVG strokes; 8 rows, and 6 rows for short terminals.
+ */
+const MARKS: string[][] = [
+  [
+    '     ▗█▀█▖      ▟▛▜▙',
+    '    ▗█▘ ▝█      █ ▐█',
+    '   ▗█▘▗▙ ▜▙     █ ▐█',
+    '  ▗█▘▗█▜▙ ▜▙    █ ▐█',
+    '  ▟▌ ▟▌ ▜▙ ▜▌   █ ▐█',
+    ' ▟▛ ▟▛   █▖▝█▖  █ ▐█',
+    '▟▛ ▟▛    ▝█▖▝█▖ █ ▐█',
+    '▜▙▟▛      ▝█▄▛▘ ▜▙▟▛',
+  ],
+  ['    ▟▀▙     ▟▀▙', '   ▟▘▗▝▙    █ █', '  ▟▘▗█▖▝▙   █ █', ' ▟▌▗▛ ▜▖▜▌  █ █', '▗▛▗▛   █▖▜▖ █ █', '▜▄▛    ▝▙▟▛ ▜▄▛'],
+];
 
-/** "aiolah" wordmark: "aio" dimmed, "lah" bright, like opencode's open/code. */
-export function wordmark(): { lines: string[]; width: number } {
-  const render = (word: string) => [0, 1, 2, 3].map((row) => [...word].map((letter) => GLYPHS[letter]![row]).join(' '));
-  const left = render('aio');
-  const right = render('lah');
+/** The home-screen logo that fits in `maxRows` rows (none when even the small one doesn't). */
+export function wordmark(maxRows = Infinity): { lines: string[]; width: number } {
+  const mark = MARKS.find((lines) => lines.length <= maxRows);
+  if (!mark) {
+    return { lines: [], width: 0 };
+  }
   return {
-    lines: left.map((part, row) => `${style.gray(part)} ${style.white(right[row]!)}`),
-    width: visibleLength(`${left[0]} ${right[0]}`),
+    lines: mark.map((line) => style.white(line)),
+    width: Math.max(...mark.map((line) => line.length)),
   };
 }
 

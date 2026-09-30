@@ -11,6 +11,7 @@ export const RELEASE_NOTES: { version: string; changes: string[] }[] = [
       'aiolah acp for editors such as Zed; /theme, /vim, /statusline, /keybindings; --print-logs and --log-level',
       '/loop, /background, /tasks; shortcuts in keybindings.json; aiolah mcp auth/logout (OAuth for MCP servers)',
       'Answers appear while they are written (streaming), with any provider and in aiolah acp',
+      'The home screen shows the new aiolah mark (as in the favicon)',
       '/remote-control inside chat; /btw, /rename, /diff, /copy, /export, /cost, /usage, /release-notes',
       'Logins expire unless used (as in Claude Code); aiolah setup-token and AIOLAH_TOKEN for CI',
       'Leaving chat prints how to resume; aiolah -r <id> / -c work without "chat"',

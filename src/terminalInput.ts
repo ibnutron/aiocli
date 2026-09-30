@@ -1204,12 +1204,14 @@ export class TerminalInput {
     let spacer: string[] = [];
     let footer: string[] = [];
     if (this.home) {
-      const mark = wordmark();
-      const pad = ' '.repeat(Math.max(0, Math.floor((width - mark.width) / 2)));
-      // Center logo + box ignoring the menu, so opening the menu doesn't move the box.
       const rows = screenRows();
-      const above = Math.max(1, Math.floor((rows - (6 + box.length + 1) - 1) / 2) - 1);
-      top = [...Array<string>(above).fill(''), ...mark.lines.map((line) => pad + line), '', ''];
+      // The biggest logo that leaves room for the box, the status line, the footer and some air.
+      const mark = wordmark(rows - (box.length + 1 + 1) - 4);
+      const pad = ' '.repeat(Math.max(0, Math.floor((width - mark.width) / 2)));
+      const logoRows = mark.lines.length ? mark.lines.length + 2 : 0;
+      // Center logo + box ignoring the menu, so opening the menu doesn't move the box.
+      const above = Math.max(1, Math.floor((rows - (logoRows + box.length + 1) - 1) / 2) - 1);
+      top = [...Array<string>(above).fill(''), ...mark.lines.map((line) => pad + line), ...(logoRows ? ['', ''] : [])];
       const version = info.version;
       const footerRoom = width - MARGIN * 2 - 1;
       const place = truncate(
