@@ -372,20 +372,21 @@ export function turnFooter(mode: string, model: string, milliseconds: number, fa
 
 /**
  * The aiolah mark (the favicon's outlined "A" and "I"), drawn in quadrant
- * blocks from its SVG strokes; 8 rows, and 6 rows for short terminals.
+ * blocks from its SVG strokes (the "I" axis on a pixel boundary so it stands
+ * straight); 8 rows, and 6 rows for short terminals.
  */
 const MARKS: string[][] = [
   [
     '     ▗█▀█▖      ▟▛▜▙',
-    '    ▗█▘ ▝█      █ ▐█',
-    '   ▗█▘▗▙ ▜▙     █ ▐█',
-    '  ▗█▘▗█▜▙ ▜▙    █ ▐█',
-    '  ▟▌ ▟▌ ▜▙ ▜▌   █ ▐█',
-    ' ▟▛ ▟▛   █▖▝█▖  █ ▐█',
-    '▟▛ ▟▛    ▝█▖▝█▖ █ ▐█',
-    '▜▙▟▛      ▝█▄▛▘ ▜▙▟▛',
+    '    ▗█▘ ▝█▖     █▌▐█',
+    '   ▗█▘▗█ ▐▙     █▌▐█',
+    '   █▘ █▜▙ ▜▙    █▌▐█',
+    '  ▟▛ ▟▛ ▜▙ ▜▙   █▌▐█',
+    ' ▟▛ ▟▛   █▖ █▖  █▌▐█',
+    '▟▛ ▟▛    ▝█▖▝█▖ █▌▐█',
+    '▜▙▟▛      ▝█▄█▘ ▜▙▟▛',
   ],
-  ['    ▟▀▙     ▟▀▙', '   ▟▘▗▝▙    █ █', '  ▟▘▗█▖▝▙   █ █', ' ▟▌▗▛ ▜▖▜▌  █ █', '▗▛▗▛   █▖▜▖ █ █', '▜▄▛    ▝▙▟▛ ▜▄▛'],
+  ['    ▟▀▙     ▟▀▙', '   ▟▘▗▝▙    █ █', '  ▟▘▗█▌▝▙   █ █', ' ▟▛▗▛ ▜▖▜▌  █ █', '▗▛▗▛   ▜▖▜▖ █ █', '▜▄▛    ▝█▄▛ ▜▄▛'],
 ];
 
 /** The home-screen logo that fits in `maxRows` rows (none when even the small one doesn't). */
