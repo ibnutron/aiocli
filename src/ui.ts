@@ -371,22 +371,24 @@ export function turnFooter(mode: string, model: string, milliseconds: number, fa
 }
 
 /**
- * The aiolah mark (the favicon's outlined "A" and "I"), drawn in quadrant
- * blocks from its SVG strokes (the "I" axis on a pixel boundary so it stands
- * straight); 8 rows, and 6 rows for short terminals.
+ * The aiolah mark (the favicon's outlined "A" and "I"), drawn from its SVG
+ * strokes with ▀ ▄ █ only (quadrant blocks are missing from many fonts, and
+ * a fallback font's wider glyphs bent the "I"); the "I" axis sits in the
+ * middle of a column so it stands straight. 9 rows, and 6 for short terminals.
  */
 const MARKS: string[][] = [
   [
-    '     ▗█▀█▖      ▟▛▜▙',
-    '    ▗█▘ ▝█▖     █▌▐█',
-    '   ▗█▘▗█ ▐▙     █▌▐█',
-    '   █▘ █▜▙ ▜▙    █▌▐█',
-    '  ▟▛ ▟▛ ▜▙ ▜▙   █▌▐█',
-    ' ▟▛ ▟▛   █▖ █▖  █▌▐█',
-    '▟▛ ▟▛    ▝█▖▝█▖ █▌▐█',
-    '▜▙▟▛      ▝█▄█▘ ▜▙▟▛',
+    '      ▄███▄       ▄███▄',
+    '      █▀  █▄      ██ ██',
+    '     █▀ ▄ ▀█      ██ ██',
+    '    █▀ ▄██ ▀█     ██ ██',
+    '   ██ ▄█▀█▄ ██    ██ ██',
+    '  ██ ▄█   █▄ ██   ██ ██',
+    ' ▄█ ▄█▀   ▀█  █▄  ██ ██',
+    '▄█ ▄█▀     ▀█  █▄ ██ ██',
+    '▀███▀       ▀███  ▀███▀',
   ],
-  ['    ▟▀▙     ▟▀▙', '   ▟▘▗▝▙    █ █', '  ▟▘▗█▌▝▙   █ █', ' ▟▛▗▛ ▜▖▜▌  █ █', '▗▛▗▛   ▜▖▜▖ █ █', '▜▄▛    ▝█▄▛ ▜▄▛'],
+  ['    ▄▀█     █▀█', '   █▀▄ █    █ █', '  ▄▀▄█▄▀█   █ █', ' ▄▀▄█ █▄▀▄  █ █', '▄▀ █   █ █▄ █ █', '█▄█     █▄▀ █▄█'],
 ];
 
 /** The home-screen logo that fits in `maxRows` rows (none when even the small one doesn't). */
