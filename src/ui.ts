@@ -125,36 +125,141 @@ export function userMessage(text: string): string {
   return [panelRow(''), ...rows.map((row) => panelRow(row)), panelRow('')].join('\n');
 }
 
+type LineKind = 'fence' | 'code' | 'heading' | 'quote' | 'text';
+
+/**
+ * Light Markdown for model replies, one source line at a time (code fences
+ * span lines, so it keeps state). Rows come back unindented.
+ */
+class MarkdownLines {
+  private inFence = false;
+
+  /** What a line is, and its text without the Markdown marker. */
+  classify(line: string): { kind: LineKind; text: string } {
+    if (/^\s*```/.test(line)) return { kind: 'fence', text: line };
+    if (this.inFence) return { kind: 'code', text: line };
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (heading) return { kind: 'heading', text: heading[2] ?? '' };
+    if (/^\s*>\s?/.test(line)) return { kind: 'quote', text: line.replace(/^\s*>\s?/, '') };
+    return { kind: 'text', text: line.replace(/^(\s*)[-*]\s+/, '$1• ') };
+  }
+
+  /** Wrapped plain rows of a classified line (before styling). */
+  wrap(kind: LineKind, text: string): string[] {
+    return kind === 'fence' ? [text] : wrapText(text, kind === 'quote' ? replyWidth() - 2 : replyWidth());
+  }
+
+  style(kind: LineKind, row: string): string {
+    switch (kind) {
+      case 'fence':
+        return style.gray(row);
+      case 'code':
+        return style.cyan(row);
+      case 'heading':
+        return style.bold(inline(row));
+      case 'quote':
+        return style.gray('│ ') + style.italic(inline(row));
+      default:
+        return inline(row);
+    }
+  }
+
+  /** A whole line, as styled rows; `kind` continues a line whose start was already shown. */
+  render(line: string, kind?: LineKind): string[] {
+    const classified = kind ? { kind, text: line } : this.classify(line);
+    if (classified.kind === 'fence') this.inFence = !this.inFence;
+    return this.wrap(classified.kind, classified.text).map((row) => this.style(classified.kind, row));
+  }
+}
+
+function replyWidth(): number {
+  return columns() - CONTENT_INDENT - MARGIN - 1;
+}
+
+function indentRows(rows: string[]): string {
+  const indent = ' '.repeat(CONTENT_INDENT);
+  return rows.map((row) => (row ? indent + row : '')).join('\n');
+}
+
 /** Model reply: light Markdown, wrapped and indented under the message panels. */
 export function assistantMessage(text: string): string {
-  const width = columns() - CONTENT_INDENT - MARGIN - 1;
-  const indent = ' '.repeat(CONTENT_INDENT);
-  let inFence = false;
-  const rows: string[] = [];
-  for (const line of text.split('\n')) {
-    if (/^\s*```/.test(line)) {
-      inFence = !inFence;
-      rows.push(style.gray(line));
-      continue;
+  const lines = new MarkdownLines();
+  return indentRows(text.split('\n').flatMap((line) => lines.render(line)));
+}
+
+/**
+ * A reply shown while it is written: `push` takes each streamed piece and
+ * returns the rows that are complete (a finished line, or the wrapped rows of
+ * a long line that can no longer change); `end` returns the rest. Blank lines
+ * at the start and end are dropped, as `assistantMessage(reply.trim())` does.
+ */
+export class AssistantStream {
+  private readonly lines = new MarkdownLines();
+  private partial = '';
+  /** Set once rows of the current line were shown: the rest keeps its kind. */
+  private continuing: LineKind | null = null;
+  private blankRows = 0;
+  private shownRows = 0;
+
+  push(text: string): string {
+    this.partial += text;
+    const rows: string[] = [];
+    let newline: number;
+    while ((newline = this.partial.indexOf('\n')) !== -1) {
+      rows.push(...this.completeLine(this.partial.slice(0, newline)));
+      this.partial = this.partial.slice(newline + 1);
     }
-    if (inFence) {
-      rows.push(...wrapText(line, width).map((row) => style.cyan(row)));
-      continue;
-    }
-    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
-    if (heading) {
-      rows.push(...wrapText(heading[2] ?? '', width).map((row) => style.bold(inline(row))));
-      continue;
-    }
-    if (/^\s*>\s?/.test(line)) {
-      rows.push(
-        ...wrapText(line.replace(/^\s*>\s?/, ''), width - 2).map((row) => style.gray('│ ') + style.italic(inline(row))),
-      );
-      continue;
-    }
-    rows.push(...wrapText(line.replace(/^(\s*)[-*]\s+/, '$1• '), width).map(inline));
+    rows.push(...this.completeRows());
+    return this.emit(rows);
   }
-  return rows.map((row) => (row ? indent + row : '')).join('\n');
+
+  end(): string {
+    const rows = this.partial ? this.completeLine(this.partial) : [];
+    this.partial = '';
+    this.continuing = null;
+    this.blankRows = 0;
+    return this.emit(rows);
+  }
+
+  /** Whether anything was shown yet. */
+  get started(): boolean {
+    return this.shownRows > 0;
+  }
+
+  private completeLine(line: string): string[] {
+    const kind = this.continuing ?? undefined;
+    this.continuing = null;
+    return this.lines.render(line, kind);
+  }
+
+  /** Rows of an unfinished long line that are final already (all but its last wrapped row). */
+  private completeRows(): string[] {
+    if (this.partial.length <= replyWidth()) return [];
+    const { kind, text } = this.continuing
+      ? { kind: this.continuing, text: this.partial }
+      : this.lines.classify(this.partial);
+    if (kind === 'fence') return [];
+    const wrapped = this.lines.wrap(kind, text);
+    if (wrapped.length < 2) return [];
+    this.continuing = kind;
+    this.partial = wrapped[wrapped.length - 1] ?? '';
+    return wrapped.slice(0, -1).map((row) => this.lines.style(kind, row));
+  }
+
+  /** Holds blank rows back until more text follows, so none trail at the end. */
+  private emit(rows: string[]): string {
+    const out: string[] = [];
+    for (const row of rows) {
+      if (!row.trim()) {
+        if (this.shownRows || out.length) this.blankRows += 1;
+        continue;
+      }
+      out.push(...Array<string>(this.blankRows).fill(''), row);
+      this.blankRows = 0;
+    }
+    this.shownRows += out.length;
+    return out.length ? indentRows(out) : '';
+  }
 }
 
 function inline(line: string): string {

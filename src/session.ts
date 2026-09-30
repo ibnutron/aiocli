@@ -154,7 +154,9 @@ export interface ChatSessionOptions {
  * follow along: `turn_start` { text, origin }, `tool` { name, input },
  * `tool_result` { name, result }, `confirm_wait` / `confirm_done` (an
  * Allow/Deny prompt is open / answered), `turn_end` { reply } and
- * `turn_error` { message }.
+ * `turn_error` { message }. With a `text` listener the model's answers are
+ * streamed: `text` { text } carries each piece as it is written (also the
+ * text before tool calls, which `reply` leaves out).
  */
 export class ChatSession extends EventEmitter {
   private client: ModelClient;
@@ -610,6 +612,8 @@ export class ChatSession extends EventEmitter {
           },
           headers,
           signal,
+          // Only asked for when someone shows the answer while it is written (chat, acp).
+          this.listenerCount('text') ? (text) => this.emit('text', { text }) : undefined,
         );
       } catch (error) {
         // The conversation no longer fits: summarize it once and try again.

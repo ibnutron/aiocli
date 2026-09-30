@@ -29,7 +29,16 @@ import {
   type PermissionMode,
   type PermissionOptions,
 } from '../permissions.js';
-import { CONTENT_INDENT, assistantMessage, style, toolActivity, toolLine, turnFooter, userMessage } from '../ui.js';
+import {
+  AssistantStream,
+  CONTENT_INDENT,
+  assistantMessage,
+  style,
+  toolActivity,
+  toolLine,
+  turnFooter,
+  userMessage,
+} from '../ui.js';
 
 interface ChatOptions extends PermissionOptions {
   model?: string;
@@ -166,7 +175,29 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
   // A stack: a subagent's tool calls run inside the `task` call that started it.
   const pendingTools: { name: string; input: unknown }[] = [];
   let toolsRan = 0;
+  // The answer is shown while it is written; each text before a tool call is its own block.
+  let replyStream: AssistantStream | null = null;
+  let streamedReply = false;
+  let toolLinesSinceText = false;
+  function endReplyBlock(): void {
+    if (!replyStream) return;
+    const rest = replyStream.end();
+    if (rest) box.print(rest);
+    if (replyStream.started) box.print('');
+    replyStream = null;
+  }
+  session.on('text', ({ text }: { text: string }) => {
+    replyStream ??= new AssistantStream();
+    const wasStarted = replyStream.started;
+    const rows = replyStream.push(text);
+    if (!rows) return;
+    if (!wasStarted && toolLinesSinceText) box.print('');
+    box.print(rows);
+    streamedReply = true;
+    toolLinesSinceText = false;
+  });
   session.on('tool', ({ name, input, agent }: { name: string; input: unknown; agent?: string }) => {
+    if (!agent) endReplyBlock();
     pendingTools.push({ name, input });
     box.setActivity(`${agent ? `${agent} › ` : ''}${toolActivity(name, input)}`);
   });
@@ -176,6 +207,7 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
     box.setActivity('');
     const line = toolLine(name, call?.input, result);
     box.print(agent ? line.replace(/^(\s*)/, `$1${style.gray(`${agent} ›`)} `) : line);
+    toolLinesSinceText = true;
   });
   session.on('hook_error', ({ message }: { message: string }) => {
     box.print(style.yellow(`${' '.repeat(CONTENT_INDENT)}${message}`));
@@ -221,16 +253,23 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
 
     const startedAt = Date.now();
     toolsRan = 0;
+    streamedReply = false;
+    toolLinesSinceText = false;
     box.setBusy(true);
     try {
       const { reply } = await session.send(text, origin, images);
       box.setBusy(false);
-      if (reply.trim()) {
+      const rest = replyStream?.end();
+      replyStream = null;
+      if (rest) {
+        box.print(rest);
+      } else if (!streamedReply && reply.trim()) {
         box.print(`${toolsRan ? '\n' : ''}${assistantMessage(reply.trim())}`);
       }
       box.print(`\n${turnFooter(modeLabel(permissionMode), session.modelId, Date.now() - startedAt)}\n`);
     } catch (error) {
       box.setBusy(false);
+      endReplyBlock();
       const message =
         error instanceof TurnInterruptedError ? 'Interrupted' : error instanceof Error ? error.message : String(error);
       box.print(`${' '.repeat(CONTENT_INDENT)}${style.red(message)}`);

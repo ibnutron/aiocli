@@ -47,6 +47,8 @@ interface AcpSession {
   /** Tool calls in progress (a stack: subagent calls run inside their task call). */
   toolCalls: { id: string; name: string; input: Json }[];
   alwaysAllowed: Set<string>;
+  /** Whether the running prompt's answer was already sent in pieces. */
+  streamed: boolean;
 }
 
 const MODE_NAMES: Record<PermissionMode, string> = {
@@ -125,7 +127,13 @@ export async function acpCommand(options: AcpOptions): Promise<void> {
       throw Object.assign(new Error('cwd must be an absolute path'), { code: -32602 });
     }
     const mcp = await startMcp(cwd, (params.mcpServers as AcpMcpServer[]) ?? []);
-    const state: Partial<AcpSession> = { mode: defaultMode, toolCalls: [], alwaysAllowed: new Set(), mcp };
+    const state: Partial<AcpSession> = {
+      mode: defaultMode,
+      toolCalls: [],
+      alwaysAllowed: new Set(),
+      mcp,
+      streamed: false,
+    };
     const session = new ChatSession({
       ...(await resolveSelection(options)),
       workspaceRoot: resolve(cwd),
@@ -168,6 +176,10 @@ export async function acpCommand(options: AcpOptions): Promise<void> {
     }
     const acpSession = Object.assign(state, { session }) as AcpSession;
 
+    session.on('text', ({ text }: { text: string }) => {
+      acpSession.streamed = true;
+      notify(session.sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } });
+    });
     session.on('tool', ({ name, input }: { name: string; input: Json }) => {
       const id = `call_${++callCounter}`;
       acpSession.toolCalls.push({ id, name, input });
@@ -301,9 +313,10 @@ export async function acpCommand(options: AcpOptions): Promise<void> {
           throw Object.assign(new Error('unknown session'), { code: -32602 });
         }
         const { text, images } = toPrompt((params.prompt as Json[]) ?? []);
+        acpSession.streamed = false;
         try {
           const { reply } = await acpSession.session.send(text || '(empty prompt)', 'terminal', images);
-          if (reply.trim()) {
+          if (!acpSession.streamed && reply.trim()) {
             notify(acpSession.session.sessionId, {
               sessionUpdate: 'agent_message_chunk',
               content: { type: 'text', text: reply },

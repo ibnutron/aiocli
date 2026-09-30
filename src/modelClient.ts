@@ -23,14 +23,24 @@ export interface ModelResponse {
   usage?: { input_tokens: number; output_tokens: number };
 }
 
+/** Receives the answer's text while it is generated (the request is then streamed). */
+export type TextListener = (text: string) => void;
+
 /**
  * One model provider behind the CLI's internal (Anthropic Messages) format.
  * `viaAiolah` = calls go through the aiolah proxy with the login token.
+ * With `onText`, the request is streamed and the text arrives as it is
+ * generated; the promise still resolves to the whole response.
  */
 export interface ModelClient {
   readonly provider: string;
   readonly viaAiolah: boolean;
-  create(request: ModelRequest, headers?: Record<string, string>, signal?: AbortSignal): Promise<ModelResponse>;
+  create(
+    request: ModelRequest,
+    headers?: Record<string, string>,
+    signal?: AbortSignal,
+    onText?: TextListener,
+  ): Promise<ModelResponse>;
 }
 
 /** Logs every model request: provider, model, duration, prompt size, and errors. */
@@ -38,15 +48,16 @@ function withLogging(client: ModelClient): ModelClient {
   return {
     provider: client.provider,
     viaAiolah: client.viaAiolah,
-    async create(request, headers, signal) {
+    async create(request, headers, signal, onText) {
       const started = Date.now();
       const purpose = headers?.['X-Aiolah-Purpose'] ?? 'turn';
       try {
-        const response = await client.create(request, headers, signal);
+        const response = await client.create(request, headers, signal, onText);
         log('INFO', 'model request', {
           provider: client.provider,
           model: request.model,
           purpose,
+          stream: Boolean(onText),
           ms: Date.now() - started,
           stop: response.stop_reason,
           input_tokens: response.usage?.input_tokens,
@@ -108,13 +119,52 @@ function anthropicClient(provider: string, client: Anthropic, viaAiolah: boolean
   return {
     provider,
     viaAiolah,
-    async create(request, headers, signal) {
+    async create(request, headers, signal, onText) {
+      const options = { ...(headers ? { headers } : {}), signal };
       try {
-        const response = await client.messages.create(request, { ...(headers ? { headers } : {}), signal });
+        if (!onText) {
+          const response = await client.messages.create(request, options);
+          return {
+            content: response.content,
+            stop_reason: response.stop_reason,
+            usage: { input_tokens: response.usage.input_tokens, output_tokens: response.usage.output_tokens },
+          };
+        }
+        const stream = client.messages.stream(request, options);
+        // The aiolah proxy can only report the prompt size at the end (in message_delta).
+        let lateInputTokens = 0;
+        // This SDK version drops thinking_delta/signature_delta when it assembles the message,
+        // and a thinking block sent back without them is rejected: collect them here.
+        const thinking = new Map<number, { thinking: string; signature: string }>();
+        stream.on('text', (text) => onText(text));
+        stream.on('streamEvent', (event) => {
+          if (event.type === 'message_delta') {
+            lateInputTokens = (event.usage as { input_tokens?: number }).input_tokens ?? 0;
+          } else if (event.type === 'content_block_delta') {
+            const delta = event.delta as { type: string; thinking?: string; signature?: string };
+            if (delta.type === 'thinking_delta' || delta.type === 'signature_delta') {
+              const entry = thinking.get(event.index) ?? { thinking: '', signature: '' };
+              entry.thinking += delta.thinking ?? '';
+              entry.signature += delta.signature ?? '';
+              thinking.set(event.index, entry);
+            }
+          }
+        });
+        const response = await stream.finalMessage();
+        for (const [index, entry] of thinking) {
+          const block = response.content[index] as { type: string; thinking?: string; signature?: string } | undefined;
+          if (block?.type === 'thinking') {
+            block.thinking = (block.thinking ?? '') + entry.thinking;
+            block.signature = (block.signature ?? '') + entry.signature;
+          }
+        }
         return {
           content: response.content,
           stop_reason: response.stop_reason,
-          usage: { input_tokens: response.usage.input_tokens, output_tokens: response.usage.output_tokens },
+          usage: {
+            input_tokens: response.usage.input_tokens || lateInputTokens,
+            output_tokens: response.usage.output_tokens,
+          },
         };
       } catch (error) {
         // The aiolah login ran out (or was revoked): say so instead of a bare 401.
@@ -131,7 +181,7 @@ function openAiClient(provider: string, baseURL: string, apiKey?: string): Model
   return {
     provider,
     viaAiolah: false,
-    async create(request, _headers, signal) {
+    async create(request, _headers, signal, onText) {
       const response = await fetch(`${baseURL}/chat/completions`, {
         method: 'POST',
         signal,
@@ -143,8 +193,15 @@ function openAiClient(provider: string, baseURL: string, apiKey?: string): Model
           'HTTP-Referer': 'https://aiolah.com',
           'X-Title': 'aiolah CLI',
         },
-        body: JSON.stringify(toOpenAiRequest(request)),
+        body: JSON.stringify({
+          ...toOpenAiRequest(request),
+          ...(onText ? { stream: true, stream_options: { include_usage: true } } : {}),
+        }),
       });
+
+      if (onText && response.ok && response.body && /event-stream/.test(response.headers.get('content-type') ?? '')) {
+        return toAnthropicResponse(await readOpenAiStream(response.body, onText, providerDef(provider).name));
+      }
 
       const text = await response.text();
       let body: OpenAiResponse;
@@ -161,6 +218,96 @@ function openAiClient(provider: string, baseURL: string, apiKey?: string): Model
       return toAnthropicResponse(body);
     },
   };
+}
+
+/**
+ * Reads a streamed Chat Completions answer (SSE `data:` chunks), passing text
+ * on as it arrives, and assembles it into the shape of a non-streamed answer.
+ */
+async function readOpenAiStream(
+  body: ReadableStream<Uint8Array>,
+  onText: TextListener,
+  providerName: string,
+): Promise<OpenAiResponse> {
+  let content = '';
+  let finishReason: string | undefined;
+  let usage: OpenAiResponse['usage'];
+  const toolCalls: { id?: string; function: { name: string; arguments: string } }[] = [];
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  const handle = (data: string) => {
+    if (data.trim() === '[DONE]') return;
+    let chunk: OpenAiStreamChunk;
+    try {
+      chunk = JSON.parse(data) as OpenAiStreamChunk;
+    } catch {
+      return;
+    }
+    if (chunk.error) {
+      throw new Error(`${providerName}: ${chunk.error.message ?? 'the stream failed'}`);
+    }
+    if (chunk.usage) usage = chunk.usage;
+    const choice = chunk.choices?.[0];
+    if (!choice) return;
+    if (choice.finish_reason) finishReason = choice.finish_reason;
+    if (choice.delta?.content) {
+      content += choice.delta.content;
+      onText(choice.delta.content);
+    }
+    for (const [position, call] of (choice.delta?.tool_calls ?? []).entries()) {
+      const slot = (toolCalls[call.index ?? position] ??= { function: { name: '', arguments: '' } });
+      if (call.id) slot.id = call.id;
+      if (call.function?.name) slot.function.name += call.function.name;
+      if (call.function?.arguments) slot.function.arguments += call.function.arguments;
+    }
+  };
+
+  const reader = body.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done }).replace(/\r\n/g, '\n');
+    let end: number;
+    while ((end = buffer.indexOf('\n\n')) !== -1 || (done && buffer.trim())) {
+      const block = end === -1 ? buffer : buffer.slice(0, end);
+      buffer = end === -1 ? '' : buffer.slice(end + 2);
+      const data = block
+        .split('\n')
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).replace(/^ /, ''))
+        .join('\n');
+      if (data) handle(data);
+    }
+    if (done) break;
+  }
+
+  if (!content && !toolCalls.length && !finishReason) {
+    throw new Error(`${providerName}: the model returned no answer`);
+  }
+  return {
+    choices: [
+      {
+        finish_reason: finishReason,
+        message: {
+          content,
+          tool_calls: toolCalls.filter(Boolean).map((call) => ({ type: 'function', ...call })),
+        },
+      },
+    ],
+    usage,
+  };
+}
+
+interface OpenAiStreamChunk {
+  choices?: {
+    finish_reason?: string | null;
+    delta?: {
+      content?: string | null;
+      tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[];
+    };
+  }[];
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  error?: { message?: string };
 }
 
 interface OpenAiToolCall {
