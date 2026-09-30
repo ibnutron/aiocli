@@ -5,6 +5,8 @@ import { resolveInWorkspace } from './tools/fileTools.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { TOOL_SCHEMAS, USE_SKILL_SCHEMA, executeTool, type ConfirmFn } from './tools/index.js';
 import { loadCustomCommands } from './customCommands.js';
+import { loadAgents, taskToolSchema, type AgentDefinition } from './agents.js';
+import { runHooks } from './hooks.js';
 import { generateSessionId, loadSession, saveSession, type SessionRecord } from './persistence.js';
 import { createModelClient, type ModelClient, type ModelResponse } from './modelClient.js';
 import { packageVersion } from './version.js';
@@ -29,6 +31,10 @@ export class TurnInterruptedError extends Error {
 }
 
 const INTERRUPTED_TOOL_RESULT = 'Interrupted by the user before this ran.';
+/** Tool calls one subagent may make before it has to report. */
+const SUBAGENT_MAX_STEPS = 40;
+/** How often a Stop hook may send the agent back to work in one turn. */
+const MAX_STOP_HOOK_ROUNDS = 3;
 
 /** A point /rewind can go back to: the start of one user turn. */
 interface Checkpoint {
@@ -166,6 +172,8 @@ export class ChatSession extends EventEmitter {
   /** Set by /rename; shown on /code and in /resume. */
   private sessionTitle: string | undefined;
   private checkpoints: Checkpoint[] = [];
+  /** Output of SessionStart hooks, added to the system prompt. */
+  private sessionContext = '';
   /** Directories added with /add-dir or --add-dir. */
   private readonly extraDirs: string[] = [];
   /** Model requests and tokens used by this conversation since the chat started (/cost). */
@@ -541,6 +549,18 @@ export class ChatSession extends EventEmitter {
       await this.compactHistory(false, undefined, signal, 'auto');
     }
 
+    const promptHook = await runHooks(this.workspaceRoot, 'UserPromptSubmit', {
+      session_id: this.id,
+      prompt: userMessage,
+    });
+    this.reportHookErrors(promptHook.errors);
+    if (promptHook.blocked) {
+      throw new Error(`Blocked by a UserPromptSubmit hook: ${promptHook.reason}`);
+    }
+    if (promptHook.context) {
+      userMessage = `${userMessage}\n\n${promptHook.context}`;
+    }
+
     this.checkpoints.push({
       historyLength: this.history.length,
       prompt: userMessage,
@@ -571,6 +591,7 @@ export class ChatSession extends EventEmitter {
       : undefined);
 
     let compactedForOverflow = false;
+    let stopRounds = 0;
     while (true) {
       let response: ModelResponse;
       try {
@@ -578,10 +599,11 @@ export class ChatSession extends EventEmitter {
           {
             model: this.model,
             max_tokens: MAX_OUTPUT_TOKENS,
-            system: buildSystemPrompt(this.workspaceRoot, {
-              planMode: this.currentMode() === 'plan',
-              extraDirs: this.extraDirs,
-            }),
+            system:
+              buildSystemPrompt(this.workspaceRoot, {
+                planMode: this.currentMode() === 'plan',
+                extraDirs: this.extraDirs,
+              }) + (this.sessionContext ? `\n\nSession context from hooks:\n${this.sessionContext}` : ''),
             tools: this.tools(),
             messages: this.history,
           },
@@ -613,6 +635,21 @@ export class ChatSession extends EventEmitter {
           .filter((block): block is Anthropic.TextBlock => block.type === 'text')
           .map((block) => block.text)
           .join('\n');
+        // A Stop hook that exits 2 sends the agent back to work with its message.
+        if (stopRounds < MAX_STOP_HOOK_ROUNDS) {
+          const stop = await runHooks(this.workspaceRoot, 'Stop', {
+            session_id: this.id,
+            stop_hook_active: stopRounds > 0,
+            last_message: reply,
+          });
+          this.reportHookErrors(stop.errors);
+          if (stop.blocked) {
+            stopRounds += 1;
+            this.history.push({ role: 'user', content: `Stop hook feedback: ${stop.reason}` });
+            this.persist();
+            continue;
+          }
+        }
         return { reply };
       }
 
@@ -625,26 +662,7 @@ export class ChatSession extends EventEmitter {
           toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: INTERRUPTED_TOOL_RESULT });
           continue;
         }
-        this.emit('tool', { name: block.name, input: block.input });
-        if (block.name === 'write_file' || block.name === 'edit_file') {
-          this.snapshotBeforeChange(block.input as Record<string, unknown>);
-        }
-        let content: string;
-        try {
-          content = await executeTool(block.name, block.input as Record<string, unknown>, {
-            workspaceRoot: this.workspaceRoot,
-            confirm: this.confirm,
-            signal,
-            mcp: this.mcp,
-            extraRoots: this.extraDirs,
-          });
-        } catch (error) {
-          content = `Error: ${error instanceof Error ? error.message : String(error)}`;
-        }
-        if (signal.aborted) {
-          content = `${content}\n(interrupted by the user)`;
-        }
-        this.emit('tool_result', { name: block.name, result: content });
+        const content = await this.callTool(block.name, block.input as Record<string, unknown>, signal);
         toolResults.push({ type: 'tool_result', tool_use_id: block.id, content });
       }
 
@@ -656,7 +674,142 @@ export class ChatSession extends EventEmitter {
 
   private tools(): Anthropic.Tool[] {
     const hasSkills = loadCustomCommands(this.workspaceRoot).some((command) => command.kind === 'skill');
-    return [...TOOL_SCHEMAS, ...(hasSkills ? [USE_SKILL_SCHEMA] : []), ...(this.mcp?.toolSchemas ?? [])];
+    return [
+      ...TOOL_SCHEMAS,
+      taskToolSchema(loadAgents(this.workspaceRoot)),
+      ...(hasSkills ? [USE_SKILL_SCHEMA] : []),
+      ...(this.mcp?.toolSchemas ?? []),
+    ];
+  }
+
+  /**
+   * Runs one tool call for the main agent or a subagent: PreToolUse hooks
+   * (exit 2 blocks it), the checkpoint snapshot, the tool itself (task starts
+   * a subagent), then PostToolUse hooks (exit 2 adds feedback to the result).
+   */
+  private async callTool(
+    name: string,
+    input: Record<string, unknown>,
+    signal: AbortSignal,
+    agent?: string,
+  ): Promise<string> {
+    this.emit('tool', { name, input, agent });
+    let content: string;
+    const pre = await runHooks(this.workspaceRoot, 'PreToolUse', {
+      session_id: this.id,
+      tool_name: name,
+      tool_input: input,
+    });
+    this.reportHookErrors(pre.errors);
+    if (pre.blocked) {
+      content = `Blocked by a PreToolUse hook: ${pre.reason}`;
+    } else {
+      if (name === 'write_file' || name === 'edit_file') {
+        this.snapshotBeforeChange(input);
+      }
+      try {
+        content =
+          name === 'task' && !agent
+            ? await this.runSubagent(input, signal)
+            : await executeTool(name, input, {
+                workspaceRoot: this.workspaceRoot,
+                confirm: this.confirm,
+                signal,
+                mcp: this.mcp,
+                extraRoots: this.extraDirs,
+              });
+      } catch (error) {
+        content = `Error: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      const post = await runHooks(this.workspaceRoot, 'PostToolUse', {
+        session_id: this.id,
+        tool_name: name,
+        tool_input: input,
+        tool_response: content,
+      });
+      this.reportHookErrors(post.errors);
+      if (post.blocked) {
+        content = `${content}\n\nPostToolUse hook feedback: ${post.reason}`;
+      }
+    }
+    if (signal.aborted) {
+      content = `${content}\n(interrupted by the user)`;
+    }
+    this.emit('tool_result', { name, result: content, agent });
+    return content;
+  }
+
+  /**
+   * The `task` tool: runs a subagent in its own context with its own tools
+   * (same model, permissions and hooks) and returns its final report.
+   */
+  private async runSubagent(input: Record<string, unknown>, signal: AbortSignal): Promise<string> {
+    const agents = loadAgents(this.workspaceRoot);
+    const agent: AgentDefinition | undefined = agents.find((item) => item.name === String(input.subagent_type));
+    if (!agent) {
+      throw new Error(
+        `No agent "${String(input.subagent_type)}". Available: ${agents.map((item) => item.name).join(', ')}`,
+      );
+    }
+    const tools = this.tools().filter(
+      (tool) => tool.name !== 'task' && (agent.tools === null || agent.tools.includes(tool.name)),
+    );
+    const system = [
+      buildSystemPrompt(this.workspaceRoot, {
+        planMode: this.currentMode() === 'plan',
+        extraDirs: this.extraDirs,
+      }),
+      '',
+      `You are the "${agent.name}" subagent, started by the main agent for one task. ${agent.prompt}`,
+      'Work only on the task below. End with a concise report of what you found or did; it is all the main agent sees.',
+    ].join('\n');
+    const messages: MessageParam[] = [{ role: 'user', content: String(input.prompt ?? '') }];
+    for (let step = 0; step < SUBAGENT_MAX_STEPS; step += 1) {
+      const response = await this.client.create(
+        { model: this.model, max_tokens: MAX_OUTPUT_TOKENS, system, tools, messages },
+        this.client.viaAiolah
+          ? { ...(this.turnHeaders ?? { 'X-Aiolah-Session': this.id }), 'X-Aiolah-Purpose': 'subagent' }
+          : undefined,
+        signal,
+      );
+      signal.throwIfAborted();
+      this.usage.requests += 1;
+      this.usage.inputTokens += response.usage?.input_tokens ?? 0;
+      this.usage.outputTokens += response.usage?.output_tokens ?? 0;
+      messages.push({ role: 'assistant', content: response.content });
+      const text = response.content
+        .filter((block): block is Anthropic.TextBlock => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n')
+        .trim();
+      if (response.stop_reason !== 'tool_use') {
+        return text || '(the subagent finished without a report)';
+      }
+      const results: Anthropic.ToolResultBlockParam[] = [];
+      for (const block of response.content) {
+        if (block.type !== 'tool_use') continue;
+        const allowed = tools.some((tool) => tool.name === block.name);
+        const content = allowed
+          ? await this.callTool(block.name, block.input as Record<string, unknown>, signal, agent.name)
+          : `Error: the ${agent.name} agent cannot use ${block.name}.`;
+        results.push({ type: 'tool_result', tool_use_id: block.id, content });
+      }
+      messages.push({ role: 'user', content: results });
+    }
+    return `The ${agent.name} agent stopped after ${SUBAGENT_MAX_STEPS} steps without finishing.`;
+  }
+
+  private reportHookErrors(errors: string[]): void {
+    for (const message of errors) {
+      this.emit('hook_error', { message });
+    }
+  }
+
+  /** SessionStart hooks (chat and run call this once): their output becomes context for the model. */
+  async startSession(source: 'startup' | 'resume'): Promise<void> {
+    const result = await runHooks(this.workspaceRoot, 'SessionStart', { session_id: this.id, source });
+    this.reportHookErrors(result.errors);
+    this.sessionContext = result.context;
   }
 
   /**

@@ -128,19 +128,25 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
     session.addDir(dir);
   }
 
+  // A stack: a subagent's tool calls run inside the `task` call that started it.
   const pendingTools: { name: string; input: unknown }[] = [];
   let toolsRan = 0;
-  session.on('tool', ({ name, input }: { name: string; input: unknown }) => {
+  session.on('tool', ({ name, input, agent }: { name: string; input: unknown; agent?: string }) => {
     pendingTools.push({ name, input });
-    box.setActivity(toolActivity(name, input));
+    box.setActivity(`${agent ? `${agent} › ` : ''}${toolActivity(name, input)}`);
   });
-  session.on('tool_result', ({ name, result }: { name: string; result: string }) => {
-    const call = pendingTools.shift();
+  session.on('tool_result', ({ name, result, agent }: { name: string; result: string; agent?: string }) => {
+    const call = pendingTools.pop();
     toolsRan += 1;
     box.setActivity('');
-    box.print(toolLine(name, call?.input, result));
+    const line = toolLine(name, call?.input, result);
+    box.print(agent ? line.replace(/^(\s*)/, `$1${style.gray(`${agent} ›`)} `) : line);
+  });
+  session.on('hook_error', ({ message }: { message: string }) => {
+    box.print(style.yellow(`${' '.repeat(CONTENT_INDENT)}${message}`));
   });
   const sync = SessionSync.attach(session, { origin: 'terminal' });
+  await session.startSession(resumeId ? 'resume' : 'startup');
 
   /** One turn with the chat's output: the prompt, tool lines, the answer and the footer. */
   async function runTurn(text: string, origin: PromptOrigin, images: ImageInput[] = [], label?: string): Promise<void> {

@@ -192,6 +192,13 @@ export function toolLine(name: string, input: unknown, result: string): string {
       }
       return [`${title}${code === '0' ? '' : style.red(` · exit ${code}`)}`, ...preview].join('\n');
     }
+    case 'task': {
+      const report = result.trim().split('\n')[0] ?? '';
+      return `${indent}${style.gray('→')} Task ${style.gray(`(${String(args.subagent_type ?? 'agent')})`)} ${truncate(
+        String(args.description ?? ''),
+        room / 2,
+      )}${suffix || (report ? style.gray(` · ${truncate(report, room / 2)}`) : '')}`;
+    }
     default: {
       const mcp = mcpParts(name);
       if (!mcp) {
@@ -220,6 +227,7 @@ export function toolActivity(name: string, input: unknown): string {
     write_file: `Writing ${String(args.path ?? '')}`,
     edit_file: `Editing ${String(args.path ?? '')}`,
     run_bash: `Running ${String(args.command ?? '')}`,
+    task: `Subagent: ${String(args.description ?? '')}`,
   };
   const mcp = mcpParts(name);
   return labels[name] ?? (mcp ? `Calling ${mcp.server} · ${mcp.tool}` : name);

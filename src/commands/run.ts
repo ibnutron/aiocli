@@ -78,6 +78,8 @@ export async function runCommand(promptParts: string[], options: RunOptions): Pr
   session.on('tool', ({ name, input }) => {
     stderr.write(`[tool] ${name} ${JSON.stringify(input)}\n`);
   });
+  session.on('hook_error', ({ message }: { message: string }) => stderr.write(`[hook] ${message}\n`));
+  await session.startSession(resumeId ? 'resume' : 'startup');
   const sync = SessionSync.attach(session, { origin: 'script' });
 
   let reply: string;

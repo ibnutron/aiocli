@@ -90,6 +90,36 @@ it with `/<name>`, and the agent also loads it by itself (`use_skill`) when a
 task matches the description. Built in: `/review`, `/security-review` and
 `/simplify`.
 
+**Subagents.** The agent can hand a self-contained task to a subagent with its
+`task` tool; the subagent works in its own context and only its report comes
+back. Built in: `general-purpose` (every tool) and `explore` (read-only
+search). Add your own as `.aiolah/agents/<name>.md` (or `.claude/agents/`,
+`~/.aiolah/agents/`) with `name`, `description` and optional `tools`
+(`Read, Grep, Bash`… as in Claude Code) in the frontmatter and the agent's
+instructions as the body; `/agents` lists them and `/agents new <name>`
+creates one. Subagents follow the same permission mode and rules.
+
+**Hooks** run your commands on events, in Claude Code's `settings.json` format
+(`~/.aiolah/settings.json`, and `.aiolah/` or `.claude/` `settings.json` /
+`settings.local.json` in the project):
+
+```json
+{ "hooks": {
+  "PostToolUse": [{ "matcher": "Edit|Write", "hooks": [{ "type": "command", "command": "npm run lint" }] }],
+  "PreToolUse":  [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "./scripts/check-command.sh" }] }]
+} }
+```
+
+Events: `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop` and
+`SessionStart`. The command gets the event as JSON on stdin (`tool_name`,
+`tool_input`, `tool_response`, `prompt`, …). Exit code 2 blocks: a tool call is
+refused (PreToolUse), the result gets the hook's message (PostToolUse), the
+prompt is refused (UserPromptSubmit) or the agent keeps working with it
+(Stop); the stdout of UserPromptSubmit and SessionStart hooks is added as
+context. Matchers are regular expressions over aiolah's tool names and Claude
+Code's (`Bash`, `Edit`, `Write`, `Read`). Project hooks run commands from the
+repo, so only use them in folders you trust. `/hooks` lists them.
+
 **Checkpoints.** Every prompt is a checkpoint. `/rewind` goes back to one:
 undo the file changes made since then (by `write_file` / `edit_file`, not by
 shell commands), the conversation, or both. `/fork` continues in a copy of the
@@ -256,6 +286,8 @@ Inside `aiolah chat`, type `/` commands:
 | `/add-dir <path>` | Let the agent use another directory too (also `--add-dir`). |
 | `/review`, `/security-review`, `/simplify` | Built-in prompts for the pending changes. |
 | `/<your-command>` | Custom commands and skills from `.aiolah/commands`, `.aiolah/skills` (and `.claude/…`). |
+| `/agents [new <name>]` | List the subagents, or create one. |
+| `/hooks` | List the hooks from settings.json. |
 | `/release-notes` | What changed in each version. |
 | `/diff [full]` | What changed in the workspace (git status and diff). |
 | `/copy [N]` | Copy the assistant's last (or Nth-last) answer to the clipboard. |

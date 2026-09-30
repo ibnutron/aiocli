@@ -25,6 +25,8 @@ import { parseRule, projectRules, saveProjectRules } from './permissionRules.js'
 import type { PermissionMode } from './permissions.js';
 import { expandCommand, loadCustomCommands, type CustomCommand } from './customCommands.js';
 import { RELEASE_NOTES } from './releaseNotes.js';
+import { agentTemplate, loadAgents } from './agents.js';
+import { loadHooks } from './hooks.js';
 
 export interface SlashCommand {
   name: string;
@@ -53,6 +55,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: 'rewind', description: 'Go back to an earlier prompt: undo file changes and/or the conversation' },
   { name: 'add-dir', args: '<path>', description: 'Let the agent work in another directory too' },
   { name: 'release-notes', description: 'What changed in each aiolah version' },
+  { name: 'agents', args: '[new <name>]', description: 'Subagents the agent can start (task tool); create one' },
+  { name: 'hooks', description: 'Hooks from settings.json that run on tool calls and prompts' },
   { name: 'diff', args: '[full]', description: 'Show what changed in the workspace (git)' },
   { name: 'copy', args: '[N]', description: "Copy the assistant's last (or Nth-last) answer" },
   { name: 'export', args: '[file]', description: 'Save the conversation as a Markdown file' },
@@ -375,6 +379,54 @@ export async function handleSlash(line: string, context: SlashContext): Promise<
           print(style.gray(`  The agent can now also use ${tildify(session.addDir(arg))} (for this chat).`));
         }
         return 'handled';
+
+      case 'agents': {
+        const [action, name] = args;
+        if (action === 'new') {
+          if (!name || !/^[a-z0-9][a-z0-9_-]*$/i.test(name)) {
+            print(style.yellow('  Usage: /agents new <name> (letters, digits, - and _)'));
+            return 'handled';
+          }
+          const path = join(session.workspace, '.aiolah', 'agents', `${name.toLowerCase()}.md`);
+          context.editFile?.(path, agentTemplate(name.toLowerCase()));
+          print(style.gray(`  Saved agents in ${tildify(path)} are available from the next message.`));
+          return 'handled';
+        }
+        print(
+          [
+            ...loadAgents(session.workspace).map(
+              (agent) =>
+                `  ${style.accent(agent.name)} ${style.gray(`(${agent.source})`)} ${agent.description}` +
+                style.gray(` · tools: ${agent.tools ? agent.tools.join(', ') : 'all'}`),
+            ),
+            style.gray(
+              '  The agent starts these with its task tool. /agents new <name> creates .aiolah/agents/<name>.md',
+            ),
+          ].join('\n'),
+        );
+        return 'handled';
+      }
+
+      case 'hooks': {
+        const hooks = loadHooks(session.workspace);
+        print(
+          hooks.length
+            ? hooks
+                .map(
+                  (hook) =>
+                    `  ${style.accent(hook.event)}${hook.matcher ? style.gray(` [${hook.matcher}]`) : ''} ` +
+                    hook.command +
+                    style.gray(` · ${tildify(hook.source)}`),
+                )
+                .join('\n')
+            : style.gray(
+                '  No hooks. Add them to .aiolah/settings.json or ~/.aiolah/settings.json (Claude Code format): ' +
+                  '{"hooks":{"PostToolUse":[{"matcher":"edit_file|write_file",' +
+                  '"hooks":[{"type":"command","command":"npm run lint"}]}]}}',
+              ),
+        );
+        return 'handled';
+      }
 
       case 'release-notes':
         print(
