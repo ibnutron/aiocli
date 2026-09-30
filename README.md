@@ -230,6 +230,14 @@ Inside `aiolah chat`, type `/` commands:
 | `/compact [instructions]` | Summarize the conversation to free up context. |
 | `/init` | Have the agent write `AGENTS.md` for this project. |
 | `/memory [edit\|user]` | List the instruction files in use, or edit the project's / your own. |
+| `/plan [task\|off]` | Plan mode: read-only until you approve a plan. |
+| `/permissions [allow\|deny\|remove <rule>]` | Show or change this folder's allow/deny rules. |
+| `/rename <title>` | Name the conversation (shown on /code and in `/resume`). |
+| `/diff [full]` | What changed in the workspace (git status and diff). |
+| `/copy [N]` | Copy the assistant's last (or Nth-last) answer to the clipboard. |
+| `/export [file]` | Save the conversation as Markdown in the workspace. |
+| `/cost` | Model requests and tokens used in this chat. |
+| `/usage` | Your aiolah plan and the chat quota left. |
 | `/connect [provider]` | Connect aiolah or a provider key. |
 | `/disconnect <provider>` | Remove a provider key (or sign out of aiolah). |
 | `/provider [id]` | Switch provider, keeping the conversation. |
@@ -250,10 +258,20 @@ Choose how much the agent may do without asking with `--permission-mode`
 |---|---|
 | `default` | Asks before every file change (`write_file`, `edit_file`), shell command (`run_bash`) and MCP tool call. |
 | `acceptEdits` | File changes are allowed; shell commands and MCP tools still ask. |
+| `plan` | Read-only: the agent looks around and proposes a plan; file changes and commands that change anything are refused. `/plan [task]` turns it on, `/plan off` or Shift+Tab leaves it. |
 | `auto` | File changes and read-only commands run; other shell commands and MCP tools are checked by the model first and only asked about when they look risky (see below). |
 | `bypassPermissions` | Never asks. Same as `--dangerously-skip-permissions` — only for sandboxes or throwaway machines. |
 
 In chat, **Shift+Tab** cycles through the modes.
+
+**Rules per project.** `/permissions` keeps allow and deny rules for the current
+folder in `~/.aiolah/permissions.json` (not in the repo, so a project can't
+grant itself access): `/permissions allow "run_bash(npm test*)"`,
+`/permissions deny "run_bash(rm *)"`, `/permissions remove <rule>`. A rule is a
+tool — `run_bash`, `edit_file`, `write_file` or `mcp__<server>__<tool>` (`*`
+matches anything) — optionally with a pattern for the command or path. Allow
+rules skip the question; deny rules refuse the action in every mode, including
+`bypassPermissions`, and the model is told why.
 
 ### Auto mode
 
@@ -368,7 +386,7 @@ Session flags (chat, run, rc, serve):
 | `-w, --workspace <dir>` | Folder the agent may read and change (default: current folder). |
 | `-c, --continue` | Continue the most recently used session. |
 | `-r, --resume <id>` | Resume a saved session by id. |
-| `--permission-mode <mode>` | `default`, `acceptEdits`, `auto` or `bypassPermissions`. |
+| `--permission-mode <mode>` | `default`, `acceptEdits`, `plan`, `auto` or `bypassPermissions`. |
 | `--dangerously-skip-permissions` | Never ask. Only use it in a sandbox. |
 
 ## Environment variables

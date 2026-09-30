@@ -300,6 +300,13 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
             await runTurn(prompt, 'terminal', [], label);
           },
           editFile,
+          permissionMode: {
+            get: () => permissionMode,
+            set: (mode) => {
+              permissionMode = mode;
+              box.refresh();
+            },
+          },
         });
         if (result === 'exit') break;
         box.print('');
@@ -347,6 +354,8 @@ function modeLabel(mode: PermissionMode): string {
       return style.yellow('Accept edits');
     case 'auto':
       return style.green('Auto');
+    case 'plan':
+      return style.cyan('Plan');
     case 'bypassPermissions':
       return style.red('Bypass');
     default:

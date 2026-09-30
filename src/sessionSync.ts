@@ -51,7 +51,7 @@ export class SessionSync {
     void this.register(this.meta);
   }
 
-  private async register(meta: { hostId?: number; origin: PromptOrigin }): Promise<string | null> {
+  private async register(meta: { hostId?: number; origin: PromptOrigin }, title?: string): Promise<string | null> {
     try {
       const response = await apiRequest<{ uuid?: string }>(serverUrl(this.auth), '/api/v1/app/cli/sessions', {
         method: 'POST',
@@ -62,6 +62,7 @@ export class SessionSync {
           workspace: this.session.workspace,
           model_key: this.session.modelId,
           origin: meta.origin,
+          ...(title ? { title } : {}),
         },
       });
       return response.data.uuid ?? null;
@@ -79,6 +80,12 @@ export class SessionSync {
 
   private listen(): void {
     this.session.on('session_changed', () => void this.switchSession());
+    // /rename: the upsert also updates the title on /code.
+    this.session.on('renamed', ({ title }: { title?: string }) => {
+      if (title) {
+        void this.ready.then(() => this.register(this.meta, title));
+      }
+    });
     this.session.on(
       'turn_start',
       ({ text, origin, images }: { text: string; origin: PromptOrigin; images?: number }) => {

@@ -20,6 +20,9 @@ import { checkLogin, expiryLabel } from './loginStatus.js';
 import { INIT_PROMPT, USER_INSTRUCTIONS_FILE, loadInstructions } from './instructions.js';
 import { join } from 'node:path';
 import type { SessionRecord } from './persistence.js';
+import { assistantReply, copyToClipboard, exportConversation, planUsage, workspaceDiff } from './chatCommands.js';
+import { parseRule, projectRules, saveProjectRules } from './permissionRules.js';
+import type { PermissionMode } from './permissions.js';
 
 export interface SlashCommand {
   name: string;
@@ -36,6 +39,18 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: 'compact', args: '[instructions]', description: 'Summarize the conversation to free up context' },
   { name: 'init', description: 'Create AGENTS.md with instructions for this project' },
   { name: 'memory', args: '[edit|user]', description: 'Show or edit the instruction files (AGENTS.md…)' },
+  { name: 'plan', args: '[task|off]', description: 'Plan mode: look around read-only and propose a plan first' },
+  {
+    name: 'permissions',
+    args: '[allow|deny|remove <rule>]',
+    description: 'Rules that always allow or deny a tool here',
+  },
+  { name: 'rename', args: '<title>', description: 'Name this conversation (shown on /code and in /resume)' },
+  { name: 'diff', args: '[full]', description: 'Show what changed in the workspace (git)' },
+  { name: 'copy', args: '[N]', description: "Copy the assistant's last (or Nth-last) answer" },
+  { name: 'export', args: '[file]', description: 'Save the conversation as a Markdown file' },
+  { name: 'cost', description: 'Requests and tokens used in this conversation' },
+  { name: 'usage', description: 'Your aiolah plan and the chat quota left' },
   { name: 'models', description: 'Switch model (all connected providers)' },
   { name: 'connect', args: '[provider]', description: 'Connect aiolah or your own provider key' },
   { name: 'disconnect', args: '<provider>', description: "Remove a provider's key (or sign out of aiolah)" },
@@ -82,6 +97,8 @@ export interface SlashContext {
   runPrompt?: (prompt: string, label: string) => Promise<void>;
   /** Opens a file in the user's editor (/memory edit). */
   editFile?: (path: string, template: string) => void;
+  /** The chat's permission mode (/plan switches it). */
+  permissionMode?: { get: () => PermissionMode; set: (mode: PermissionMode) => void };
 }
 
 const CONNECT_ACTION = '\u0000connect';
@@ -167,6 +184,128 @@ export async function handleSlash(line: string, context: SlashContext): Promise<
           print(style.yellow('  Choose a model first: /models'));
         } else {
           await context.runPrompt(INIT_PROMPT, '/init — create AGENTS.md for this project');
+        }
+        return 'handled';
+
+      case 'plan': {
+        if (!context.permissionMode) {
+          print(style.yellow('  /plan is only available in aiolah chat.'));
+          return 'handled';
+        }
+        if (arg === 'off') {
+          context.permissionMode.set('default');
+          print(style.gray('  Plan mode off — back to the default mode.'));
+          return 'handled';
+        }
+        context.permissionMode.set('plan');
+        print(style.gray('  Plan mode on: read-only until you approve a plan (/plan off or Shift+Tab to leave).'));
+        if (arg && context.runPrompt && session.modelId) {
+          await context.runPrompt(arg, arg);
+        }
+        return 'handled';
+      }
+
+      case 'permissions': {
+        const [action = 'list', ...ruleParts] = args;
+        const rule = ruleParts.join(' ').trim();
+        const rules = projectRules(session.workspace);
+        if (action === 'list' || !['allow', 'deny', 'remove'].includes(action)) {
+          const row = (label: string, list: string[]) => {
+            const shown = list.length ? list.map((item) => style.accent(item)).join(', ') : style.gray('none');
+            return `  ${style.bold(label)} ${shown}`;
+          };
+          print(
+            [
+              row('allow', rules.allow),
+              row('deny ', rules.deny),
+              style.gray(
+                '  /permissions allow "run_bash(npm test*)" · deny "run_bash(rm *)" · remove <rule>. ' +
+                  'Rules: run_bash(<cmd>*), edit_file(<path>*), write_file(<path>*), mcp__<server>__<tool|*>.',
+              ),
+            ].join('\n'),
+          );
+          return 'handled';
+        }
+        const cleaned = rule.replace(/^["']|["']$/g, '');
+        if (!parseRule(cleaned)) {
+          print(style.yellow(`  Not a rule: ${rule || '(empty)'}. Example: run_bash(npm test*)`));
+          return 'handled';
+        }
+        const without = (list: string[]) => list.filter((item) => item !== cleaned);
+        const next =
+          action === 'remove'
+            ? { allow: without(rules.allow), deny: without(rules.deny) }
+            : action === 'allow'
+              ? { allow: [...without(rules.allow), cleaned], deny: without(rules.deny) }
+              : { allow: without(rules.allow), deny: [...without(rules.deny), cleaned] };
+        saveProjectRules(session.workspace, next);
+        print(style.gray(`  ${action === 'remove' ? 'Removed' : `Will ${action}`} ${cleaned} in this folder.`));
+        return 'handled';
+      }
+
+      case 'rename':
+        if (!arg) {
+          print(style.yellow('  Usage: /rename <title>'));
+        } else {
+          session.rename(arg);
+          print(style.gray(`  Renamed to "${session.title}".`));
+        }
+        return 'handled';
+
+      case 'diff':
+        print(
+          workspaceDiff(session.workspace, arg === 'full')
+            .split('\n')
+            .map((line) =>
+              line.startsWith('+') && !line.startsWith('+++')
+                ? style.green(line)
+                : line.startsWith('-') && !line.startsWith('---')
+                  ? style.red(line)
+                  : line,
+            )
+            .map((line) => `  ${line}`)
+            .join('\n'),
+        );
+        return 'handled';
+
+      case 'copy': {
+        const reply = assistantReply(session, Math.max(1, Number(arg) || 1));
+        if (!reply) {
+          print(style.gray('  No answer to copy yet.'));
+          return 'handled';
+        }
+        const method = copyToClipboard(reply);
+        print(style.gray(method ? `  Copied ${reply.length} characters (${method}).` : '  Could not copy.'));
+        return 'handled';
+      }
+
+      case 'export': {
+        const path = exportConversation(session, arg);
+        print(style.gray(`  Saved to ${tildify(path)}`));
+        return 'handled';
+      }
+
+      case 'cost': {
+        const { requests, inputTokens, outputTokens } = session.usage;
+        const billing =
+          providerDef(session.providerId).kind === 'aiolah'
+            ? 'each request uses your aiolah plan quota (/usage)'
+            : `billed by ${providerDef(session.providerId).name} to your own key`;
+        print(
+          style.gray(
+            `  ${requests} model requests · ${formatTokens(inputTokens)} input + ${formatTokens(outputTokens)} ` +
+              `output tokens this chat · ${billing}`,
+          ),
+        );
+        return 'handled';
+      }
+
+      case 'usage':
+        context.loading('Loading your plan…');
+        try {
+          print(style.gray(`  ${await planUsage()}`));
+        } finally {
+          context.loading(null);
         }
         return 'handled';
 
@@ -524,7 +663,7 @@ async function pickSession(context: SlashContext): Promise<string | null> {
     return null;
   }
   const item = (record: SessionRecord, showFolder: boolean) => ({
-    label: sessionTitle(record),
+    label: record.title ?? sessionTitle(record),
     detail: `${record.updatedAt.slice(0, 16).replace('T', ' ')}${showFolder ? ` · ${tildify(record.workspace)}` : ''}`,
     value: record.id,
   });

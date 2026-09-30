@@ -6,6 +6,8 @@ import type Anthropic from '@anthropic-ai/sdk';
 
 export interface SessionRecord {
   id: string;
+  /** Set by /rename. */
+  title?: string;
   model: string;
   /** Provider id the session last used (absent in sessions saved before providers existed). */
   provider?: string;

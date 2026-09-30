@@ -122,6 +122,11 @@ export class ChatSession extends EventEmitter {
   private history: MessageParam[];
   /** Prompt size of the last request (from the provider's usage), 0 when unknown. */
   private lastInputTokens = 0;
+  private readonly currentMode: () => PermissionMode;
+  /** Set by /rename; shown on /code and in /resume. */
+  private sessionTitle: string | undefined;
+  /** Model requests and tokens used by this conversation since the chat started (/cost). */
+  readonly usage = { requests: 0, inputTokens: 0, outputTokens: 0 };
   private abortController: AbortController | null = null;
   /** aiolah context headers of the running turn (reused by auto-mode reviews). */
   private turnHeaders: Record<string, string> | undefined;
@@ -133,11 +138,21 @@ export class ChatSession extends EventEmitter {
     this.workspaceRoot = options.workspaceRoot;
     this.mcp = options.mcp;
     const mode = options.permissionMode;
-    const currentMode = typeof mode === 'function' ? mode : () => mode ?? 'default';
+    this.currentMode = typeof mode === 'function' ? mode : () => mode ?? 'default';
     this.confirm = async (description, tool) => {
-      const decision = await decidePermission(currentMode(), description, tool, (action) => this.reviewAction(action));
+      const decision = await decidePermission(
+        this.currentMode(),
+        description,
+        tool,
+        (action) => this.reviewAction(action),
+        this.workspaceRoot,
+      );
       if (decision.allow) {
         return true;
+      }
+      if ('deny' in decision) {
+        // Refused without asking (plan mode, a deny rule): the tool call fails with the reason.
+        throw new Error(decision.deny);
       }
       this.emit('confirm_wait', { description: decision.ask, tool });
       try {
@@ -152,6 +167,7 @@ export class ChatSession extends EventEmitter {
       this.id = record.id;
       this.createdAt = record.createdAt;
       this.history = record.history;
+      this.sessionTitle = record.title;
     } else {
       this.id = generateSessionId();
       this.createdAt = new Date().toISOString();
@@ -186,12 +202,24 @@ export class ChatSession extends EventEmitter {
     return this.lastInputTokens || Math.round(JSON.stringify(this.history).length / CHARS_PER_TOKEN);
   }
 
+  get title(): string | undefined {
+    return this.sessionTitle;
+  }
+
+  /** `/rename`: names the conversation (saved locally; SessionSync sends it to /code). */
+  rename(title: string): void {
+    this.sessionTitle = title.trim().slice(0, 120) || undefined;
+    this.persist();
+    this.emit('renamed', { title: this.sessionTitle });
+  }
+
   /** `/clear`: a new, empty conversation (the old one stays saved for /resume). */
   startNew(): void {
     this.assertIdle();
     this.id = generateSessionId();
     this.createdAt = new Date().toISOString();
     this.history = [];
+    this.sessionTitle = undefined;
     this.lastInputTokens = 0;
     this.emit('session_changed', { reason: 'new' });
   }
@@ -203,6 +231,7 @@ export class ChatSession extends EventEmitter {
     this.id = record.id;
     this.createdAt = record.createdAt;
     this.history = record.history;
+    this.sessionTitle = record.title;
     this.lastInputTokens = 0;
     this.emit('session_changed', { reason: 'resume' });
   }
@@ -374,7 +403,7 @@ export class ChatSession extends EventEmitter {
           {
             model: this.model,
             max_tokens: MAX_OUTPUT_TOKENS,
-            system: buildSystemPrompt(this.workspaceRoot),
+            system: buildSystemPrompt(this.workspaceRoot, { planMode: this.currentMode() === 'plan' }),
             tools: this.tools(),
             messages: this.history,
           },
@@ -394,6 +423,9 @@ export class ChatSession extends EventEmitter {
       if (response.usage?.input_tokens) {
         this.lastInputTokens = response.usage.input_tokens + (response.usage.output_tokens ?? 0);
       }
+      this.usage.requests += 1;
+      this.usage.inputTokens += response.usage?.input_tokens ?? 0;
+      this.usage.outputTokens += response.usage?.output_tokens ?? 0;
 
       this.history.push({ role: 'assistant', content: response.content });
       this.persist();
@@ -566,6 +598,7 @@ export class ChatSession extends EventEmitter {
       updatedAt: new Date().toISOString(),
       provider: this.client.provider,
       history: this.history,
+      ...(this.sessionTitle ? { title: this.sessionTitle } : {}),
     };
     saveSession(record);
   }

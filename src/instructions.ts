@@ -53,7 +53,7 @@ export function loadInstructions(workspaceRoot: string): InstructionFile[] {
  * to use its tools, then the instruction files. Rebuilt for every request, so
  * edits to AGENTS.md apply on the next message.
  */
-export function buildSystemPrompt(workspaceRoot: string): string {
+export function buildSystemPrompt(workspaceRoot: string, options: { planMode?: boolean } = {}): string {
   const parts = [
     "You are aiolah, an AI coding agent working in the user's project from their terminal. " +
       'You read and change files and run commands with your tools, then explain briefly what you did.',
@@ -72,6 +72,16 @@ export function buildSystemPrompt(workspaceRoot: string): string {
       'that the user did not give.',
     '- Be concise. Answer in the language the user writes in.',
   ];
+
+  if (options.planMode) {
+    parts.push(
+      '',
+      'PLAN MODE is on. Investigate with read-only actions (reading files, listing folders, read-only commands) ' +
+        'and then present a concise, concrete plan: the steps, the files to change and how. ' +
+        'Do not change files or run commands that change anything; those are refused until the user approves ' +
+        'the plan and leaves plan mode.',
+    );
+  }
 
   for (const file of loadInstructions(workspaceRoot)) {
     const label =
