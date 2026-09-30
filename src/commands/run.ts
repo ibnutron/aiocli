@@ -17,6 +17,7 @@ interface RunOptions extends PermissionOptions {
   resume?: string;
   continue?: boolean;
   outputFormat: string;
+  addDir?: string[];
 }
 
 /**
@@ -71,6 +72,9 @@ export async function runCommand(promptParts: string[], options: RunOptions): Pr
     mcp,
   });
 
+  for (const dir of options.addDir ?? []) {
+    session.addDir(dir);
+  }
   session.on('tool', ({ name, input }) => {
     stderr.write(`[tool] ${name} ${JSON.stringify(input)}\n`);
   });

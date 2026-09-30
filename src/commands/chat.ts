@@ -13,7 +13,7 @@ import type { ImageInput } from '../protocol.js';
 import { findLatestSession } from '../persistence.js';
 import { ensureTrusted } from '../trust.js';
 import { mcpSummary, startMcp } from '../mcp/index.js';
-import { handleSlash } from '../slash.js';
+import { handleSlash, setCommandWorkspace } from '../slash.js';
 import { providerDef, resolveProvider, resolveProviderModel } from '../providers.js';
 import { packageVersion } from '../version.js';
 import { TerminalInput } from '../terminalInput.js';
@@ -32,6 +32,7 @@ interface ChatOptions extends PermissionOptions {
   workspace: string;
   resume?: string;
   continue?: boolean;
+  addDir?: string[];
 }
 
 export async function chatCommand(options: ChatOptions): Promise<void> {
@@ -43,6 +44,7 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
   }
   // Also before readline: new project servers are asked about in the same way.
   const mcp = await startMcp(workspaceRoot);
+  setCommandWorkspace(workspaceRoot);
   const rl = readline.createInterface({ input: stdin, output: stdout });
 
   const resumeId = options.resume ?? (options.continue ? findLatestSession()?.id : undefined);
@@ -122,6 +124,9 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
     mcp,
   });
   const session = chat;
+  for (const dir of options.addDir ?? []) {
+    session.addDir(dir);
+  }
 
   const pendingTools: { name: string; input: unknown }[] = [];
   let toolsRan = 0;
@@ -169,7 +174,11 @@ export async function chatCommand(options: ChatOptions): Promise<void> {
   }
 
   // /clear and /resume switch the conversation: redraw the screen for it.
-  session.on('session_changed', ({ reason }: { reason: 'new' | 'resume' }) => {
+  session.on('session_changed', ({ reason }: { reason: 'new' | 'resume' | 'fork' }) => {
+    if (reason === 'fork') {
+      box.refresh();
+      return;
+    }
     box.clearScreen();
     if (reason === 'resume') {
       const items = session.renderHistory();

@@ -2,6 +2,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { editFile, listDir, readFile, writeFile } from './fileTools.js';
 import { runBash } from './bashTool.js';
 import type { McpManager } from '../mcp/manager.js';
+import { loadCustomCommands } from '../customCommands.js';
 
 /** Asks whether a mutating tool may run; `tool` is the tool name (write_file, edit_file, run_bash, mcp__…). */
 export type ConfirmFn = (description: string, tool: string) => Promise<boolean>;
@@ -62,6 +63,19 @@ export const TOOL_SCHEMAS: Anthropic.Tool[] = [
   },
 ];
 
+/** Offered when the workspace or the user has skills (skills/<name>/SKILL.md). */
+export const USE_SKILL_SCHEMA: Anthropic.Tool = {
+  name: 'use_skill',
+  description:
+    'Load the instructions of a skill listed in the system prompt, when the task matches its description. ' +
+    'Returns the skill text to follow.',
+  input_schema: {
+    type: 'object',
+    properties: { name: { type: 'string', description: 'Skill name' } },
+    required: ['name'],
+  },
+};
+
 export interface ToolExecutionContext {
   workspaceRoot: string;
   confirm: ConfirmFn;
@@ -69,6 +83,8 @@ export interface ToolExecutionContext {
   signal?: AbortSignal;
   /** Connected MCP servers; their tools are named mcp__<server>__<tool>. */
   mcp?: McpManager;
+  /** Directories added with /add-dir or --add-dir, usable next to the workspace. */
+  extraRoots?: string[];
 }
 
 export async function executeTool(
@@ -77,20 +93,21 @@ export async function executeTool(
   context: ToolExecutionContext,
 ): Promise<string> {
   const { workspaceRoot, confirm, signal, mcp } = context;
+  const roots = [workspaceRoot, ...(context.extraRoots ?? [])];
 
   switch (name) {
     case 'read_file':
-      return readFile(workspaceRoot, String(input.path));
+      return readFile(roots, String(input.path));
 
     case 'list_dir':
-      return listDir(workspaceRoot, String(input.path)).join('\n');
+      return listDir(roots, String(input.path)).join('\n');
 
     case 'write_file': {
       const path = String(input.path);
       if (!(await confirm(`write_file: ${path}`, 'write_file'))) {
         return 'User declined this action.';
       }
-      writeFile(workspaceRoot, path, String(input.content));
+      writeFile(roots, path, String(input.content));
       return `Wrote ${path}`;
     }
 
@@ -99,7 +116,7 @@ export async function executeTool(
       if (!(await confirm(`edit_file: ${path}`, 'edit_file'))) {
         return 'User declined this action.';
       }
-      editFile(workspaceRoot, path, String(input.old_string), String(input.new_string));
+      editFile(roots, path, String(input.old_string), String(input.new_string));
       return `Edited ${path}`;
     }
 
@@ -110,6 +127,16 @@ export async function executeTool(
       }
       const result = await runBash(workspaceRoot, command, signal);
       return `exit code: ${result.exitCode}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
+    }
+
+    case 'use_skill': {
+      const skill = loadCustomCommands(workspaceRoot).find(
+        (command) => command.kind === 'skill' && command.name === String(input.name).toLowerCase(),
+      );
+      if (!skill) {
+        throw new Error(`No skill named "${String(input.name)}".`);
+      }
+      return skill.body;
     }
 
     default: {

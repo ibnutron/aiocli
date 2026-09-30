@@ -71,7 +71,8 @@ addPermissionOptions(
     .option('-P, --provider <id>', 'model provider: aiolah (your plan) or one you connected (see "aiolah connect")')
     .option('-w, --workspace <dir>', 'workspace root for file/bash tools', '.')
     .option('-r, --resume <id>', 'resume a saved session by id')
-    .option('-c, --continue', 'resume the most recently updated session'),
+    .option('-c, --continue', 'resume the most recently updated session')
+    .option('--add-dir <dirs...>', 'other directories the agent may use besides the workspace'),
 ).action(chatCommand);
 
 addPermissionOptions(
@@ -122,7 +123,8 @@ addPermissionOptions(
     .option('-w, --workspace <dir>', 'workspace root for file/bash tools', '.')
     .option('-r, --resume <id>', 'continue a saved session by id')
     .option('-c, --continue', 'continue the most recently updated session')
-    .option('--output-format <format>', 'text or json', 'text'),
+    .option('--output-format <format>', 'text or json', 'text')
+    .option('--add-dir <dirs...>', 'other directories the agent may use besides the workspace'),
 ).action(runCommand);
 
 program

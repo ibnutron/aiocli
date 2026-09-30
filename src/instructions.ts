@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { join, resolve } from 'node:path';
+import { loadCustomCommands } from './customCommands.js';
 
 /** Project instruction files read from the workspace root, in this order (as AGENTS.md / CLAUDE.md elsewhere). */
 export const PROJECT_INSTRUCTION_FILES = ['AGENTS.md', 'AIOLAH.md', 'CLAUDE.md'];
@@ -53,7 +54,10 @@ export function loadInstructions(workspaceRoot: string): InstructionFile[] {
  * to use its tools, then the instruction files. Rebuilt for every request, so
  * edits to AGENTS.md apply on the next message.
  */
-export function buildSystemPrompt(workspaceRoot: string, options: { planMode?: boolean } = {}): string {
+export function buildSystemPrompt(
+  workspaceRoot: string,
+  options: { planMode?: boolean; extraDirs?: string[] } = {},
+): string {
   const parts = [
     "You are aiolah, an AI coding agent working in the user's project from their terminal. " +
       'You read and change files and run commands with your tools, then explain briefly what you did.',
@@ -73,6 +77,14 @@ export function buildSystemPrompt(workspaceRoot: string, options: { planMode?: b
     '- Be concise. Answer in the language the user writes in.',
   ];
 
+  if (options.extraDirs?.length) {
+    parts.push(
+      '',
+      'You may also read and change files in these directories (use absolute paths for them):',
+      ...options.extraDirs.map((dir) => `- ${dir}`),
+    );
+  }
+
   if (options.planMode) {
     parts.push(
       '',
@@ -80,6 +92,15 @@ export function buildSystemPrompt(workspaceRoot: string, options: { planMode?: b
         'and then present a concise, concrete plan: the steps, the files to change and how. ' +
         'Do not change files or run commands that change anything; those are refused until the user approves ' +
         'the plan and leaves plan mode.',
+    );
+  }
+
+  const skills = loadCustomCommands(workspaceRoot).filter((command) => command.kind === 'skill');
+  if (skills.length) {
+    parts.push(
+      '',
+      'Skills available (load one with the use_skill tool when the task matches its description):',
+      ...skills.map((skill) => `- ${skill.name}: ${skill.description}`),
     );
   }
 

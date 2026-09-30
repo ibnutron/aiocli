@@ -23,6 +23,8 @@ import type { SessionRecord } from './persistence.js';
 import { assistantReply, copyToClipboard, exportConversation, planUsage, workspaceDiff } from './chatCommands.js';
 import { parseRule, projectRules, saveProjectRules } from './permissionRules.js';
 import type { PermissionMode } from './permissions.js';
+import { expandCommand, loadCustomCommands, type CustomCommand } from './customCommands.js';
+import { RELEASE_NOTES } from './releaseNotes.js';
 
 export interface SlashCommand {
   name: string;
@@ -46,6 +48,11 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     description: 'Rules that always allow or deny a tool here',
   },
   { name: 'rename', args: '<title>', description: 'Name this conversation (shown on /code and in /resume)' },
+  { name: 'btw', args: '<question>', description: 'Ask a side question without adding it to the conversation' },
+  { name: 'fork', description: 'Continue in a copy of this conversation (the original stays in /resume)' },
+  { name: 'rewind', description: 'Go back to an earlier prompt: undo file changes and/or the conversation' },
+  { name: 'add-dir', args: '<path>', description: 'Let the agent work in another directory too' },
+  { name: 'release-notes', description: 'What changed in each aiolah version' },
   { name: 'diff', args: '[full]', description: 'Show what changed in the workspace (git)' },
   { name: 'copy', args: '[N]', description: "Copy the assistant's last (or Nth-last) answer" },
   { name: 'export', args: '[file]', description: 'Save the conversation as a Markdown file' },
@@ -71,9 +78,46 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: 'reset', description: 'Same as /clear', hidden: true },
 ];
 
+/** Folder whose custom commands and skills are offered (set by `aiolah chat`). */
+let commandWorkspace: string | null = null;
+let customCache: { at: number; commands: CustomCommand[] } | null = null;
+const CUSTOM_CACHE_MS = 3_000;
+
+export function setCommandWorkspace(workspaceRoot: string): void {
+  commandWorkspace = workspaceRoot;
+  customCache = null;
+}
+
+/** Prompt commands and skills of the workspace (re-read every few seconds, so new files show up). */
+export function customCommands(): CustomCommand[] {
+  if (!commandWorkspace) {
+    return [];
+  }
+  if (!customCache || Date.now() - customCache.at > CUSTOM_CACHE_MS) {
+    const builtIn = new Set(SLASH_COMMANDS.map((command) => command.name));
+    customCache = {
+      at: Date.now(),
+      commands: loadCustomCommands(commandWorkspace).filter((command) => !builtIn.has(command.name)),
+    };
+  }
+  return customCache.commands;
+}
+
+function asSlashCommand(command: CustomCommand): SlashCommand {
+  const origin = command.source === 'built-in' ? '' : ` (${command.source} ${command.kind})`;
+  return {
+    name: command.name,
+    args: command.argumentHint ?? (command.kind === 'skill' ? '[request]' : undefined),
+    description: `${command.description}${origin}`,
+  };
+}
+
 /** Menu commands whose name starts with `prefix` (without the slash). */
 export function matchSlashCommands(prefix: string): SlashCommand[] {
-  return SLASH_COMMANDS.filter((command) => !command.hidden && command.name.startsWith(prefix.toLowerCase()));
+  const lower = prefix.toLowerCase();
+  return [...SLASH_COMMANDS.filter((command) => !command.hidden), ...customCommands().map(asSlashCommand)].filter(
+    (command) => command.name.startsWith(lower),
+  );
 }
 
 /** What a slash command may do with the chat screen. */
@@ -105,7 +149,7 @@ const CONNECT_ACTION = '\u0000connect';
 const LIST_TIMEOUT_MS = 15_000;
 
 function helpText(): string {
-  const visible = SLASH_COMMANDS.filter((command) => !command.hidden);
+  const visible = [...SLASH_COMMANDS.filter((command) => !command.hidden), ...customCommands().map(asSlashCommand)];
   const width = Math.max(...visible.map((command) => `/${command.name} ${command.args ?? ''}`.length)) + 2;
   const commands = visible.map(
     (command) =>
@@ -128,9 +172,9 @@ export async function handleSlash(line: string, context: SlashContext): Promise<
   const [typed = '', ...args] = line.trim().slice(1).split(/\s+/);
   const arg = args.join(' ').trim() || undefined;
   // `/mod` runs the first matching command, like picking it from the menu.
-  const command = SLASH_COMMANDS.some((item) => item.name === typed)
-    ? typed
-    : (matchSlashCommands(typed)[0]?.name ?? typed);
+  const known =
+    SLASH_COMMANDS.some((item) => item.name === typed) || customCommands().some((item) => item.name === typed);
+  const command = known ? typed : (matchSlashCommands(typed)[0]?.name ?? typed);
 
   try {
     switch (command) {
@@ -242,6 +286,105 @@ export async function handleSlash(line: string, context: SlashContext): Promise<
         print(style.gray(`  ${action === 'remove' ? 'Removed' : `Will ${action}`} ${cleaned} in this folder.`));
         return 'handled';
       }
+
+      case 'btw': {
+        if (!arg) {
+          print(style.yellow('  Usage: /btw <question>'));
+          return 'handled';
+        }
+        if (!session.modelId) {
+          print(style.yellow('  Choose a model first: /models'));
+          return 'handled';
+        }
+        context.loading('Thinking about your side question…');
+        let answer: string;
+        try {
+          answer = await session.aside(arg);
+        } finally {
+          context.loading(null);
+        }
+        print(`${style.gray('  btw — not added to the conversation')}\n${answer.replace(/^/gm, '  ')}`);
+        return 'handled';
+      }
+
+      case 'fork': {
+        const original = session.fork();
+        print(style.gray(`  Forked: you are now in ${session.sessionId}; the original (${original}) is in /resume.`));
+        return 'handled';
+      }
+
+      case 'rewind': {
+        const checkpoints = session.listCheckpoints();
+        if (!checkpoints.length) {
+          print(style.gray('  Nothing to rewind yet in this chat.'));
+          return 'handled';
+        }
+        const picked = await context.pick({
+          title: 'Rewind to before…',
+          sections: [
+            {
+              items: checkpoints
+                .slice()
+                .reverse()
+                .map((checkpoint) => ({
+                  label: checkpoint.prompt.replace(/\s+/g, ' ').slice(0, 70),
+                  detail:
+                    `${checkpoint.at.toLocaleTimeString()} · ` +
+                    `${checkpoint.files} file${checkpoint.files === 1 ? '' : 's'} changed after`,
+                  value: String(checkpoint.index),
+                })),
+            },
+          ],
+        });
+        if (picked === null) {
+          return 'handled';
+        }
+        const target = checkpoints[Number(picked)]!;
+        const what = await context.pick({
+          title: 'Restore',
+          sections: [
+            {
+              items: [
+                { label: 'Code and conversation', value: 'both', disabled: !target.conversation },
+                { label: 'Conversation only', value: 'conversation', disabled: !target.conversation },
+                { label: 'Code only', value: 'code' },
+              ],
+            },
+          ],
+        });
+        if (what === null) {
+          return 'handled';
+        }
+        const result = session.rewind(target.index, what as 'both' | 'code' | 'conversation');
+        const restored =
+          what === 'conversation' ? '' : `${result.files} file change${result.files === 1 ? '' : 's'} undone. `;
+        const back = what === 'code' ? '' : `Conversation is back to before: "${result.prompt.slice(0, 80)}". `;
+        print(style.gray(`  ${restored}${back}Changes made by shell commands are not undone.`));
+        return 'handled';
+      }
+
+      case 'add-dir':
+        if (!arg) {
+          const dirs = session.additionalDirectories;
+          print(
+            style.gray(
+              dirs.length ? `  Added: ${dirs.map((dir) => tildify(dir)).join(', ')}` : '  Usage: /add-dir <path>',
+            ),
+          );
+        } else {
+          print(style.gray(`  The agent can now also use ${tildify(session.addDir(arg))} (for this chat).`));
+        }
+        return 'handled';
+
+      case 'release-notes':
+        print(
+          RELEASE_NOTES.map(
+            (release) =>
+              `  ${style.bold(release.version)}\n` +
+              release.changes.map((change) => `  ${style.gray('•')} ${change}`).join('\n'),
+          ).join('\n\n'),
+        );
+        return 'handled';
 
       case 'rename':
         if (!arg) {
@@ -452,9 +595,19 @@ export async function handleSlash(line: string, context: SlashContext): Promise<
         }
         return 'handled';
 
-      default:
+      default: {
+        const custom = customCommands().find((item) => item.name === command);
+        if (custom && context.runPrompt) {
+          if (!session.modelId) {
+            print(style.yellow('  Choose a model first: /models'));
+          } else {
+            await context.runPrompt(expandCommand(custom, arg ?? ''), `/${custom.name}${arg ? ` ${arg}` : ''}`);
+          }
+          return 'handled';
+        }
         print(style.yellow(`  Unknown command /${typed}. Type /help.`));
         return 'handled';
+      }
     }
   } catch (error) {
     context.loading(null);

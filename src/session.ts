@@ -1,6 +1,10 @@
 import { EventEmitter } from 'node:events';
+import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
+import { resolveInWorkspace } from './tools/fileTools.js';
 import Anthropic from '@anthropic-ai/sdk';
-import { TOOL_SCHEMAS, executeTool, type ConfirmFn } from './tools/index.js';
+import { TOOL_SCHEMAS, USE_SKILL_SCHEMA, executeTool, type ConfirmFn } from './tools/index.js';
+import { loadCustomCommands } from './customCommands.js';
 import { generateSessionId, loadSession, saveSession, type SessionRecord } from './persistence.js';
 import { createModelClient, type ModelClient, type ModelResponse } from './modelClient.js';
 import { packageVersion } from './version.js';
@@ -25,6 +29,42 @@ export class TurnInterruptedError extends Error {
 }
 
 const INTERRUPTED_TOOL_RESULT = 'Interrupted by the user before this ran.';
+
+/** A point /rewind can go back to: the start of one user turn. */
+interface Checkpoint {
+  /** History length before the prompt; -1 once compaction rewrote the history (code-only rewind). */
+  historyLength: number;
+  prompt: string;
+  at: Date;
+  /** Files changed by write_file / edit_file in this turn → their content before (null = did not exist). */
+  files: Map<string, string | null>;
+}
+
+export interface CheckpointInfo {
+  index: number;
+  prompt: string;
+  at: Date;
+  files: number;
+  conversation: boolean;
+}
+
+/** Ends `messages` with a user message carrying `text` (merged into trailing tool results). */
+function withUserText(messages: MessageParam[], text: string): MessageParam[] {
+  const last = messages[messages.length - 1];
+  if (last?.role !== 'user') {
+    return [...messages, { role: 'user', content: text }];
+  }
+  return [
+    ...messages.slice(0, -1),
+    {
+      role: 'user',
+      content: [
+        ...(typeof last.content === 'string' ? [{ type: 'text' as const, text: last.content }] : last.content),
+        { type: 'text' as const, text },
+      ],
+    },
+  ];
+}
 
 const MAX_OUTPUT_TOKENS = 4096;
 const CHARS_PER_TOKEN = 4;
@@ -125,6 +165,9 @@ export class ChatSession extends EventEmitter {
   private readonly currentMode: () => PermissionMode;
   /** Set by /rename; shown on /code and in /resume. */
   private sessionTitle: string | undefined;
+  private checkpoints: Checkpoint[] = [];
+  /** Directories added with /add-dir or --add-dir. */
+  private readonly extraDirs: string[] = [];
   /** Model requests and tokens used by this conversation since the chat started (/cost). */
   readonly usage = { requests: 0, inputTokens: 0, outputTokens: 0 };
   private abortController: AbortController | null = null;
@@ -213,6 +256,130 @@ export class ChatSession extends EventEmitter {
     this.emit('renamed', { title: this.sessionTitle });
   }
 
+  get additionalDirectories(): string[] {
+    return [...this.extraDirs];
+  }
+
+  /** `/add-dir`: lets the tools read and change files in another directory too. */
+  addDir(path: string): string {
+    const absolute = resolvePath(this.workspaceRoot, path);
+    if (!existsSync(absolute) || !statSync(absolute).isDirectory()) {
+      throw new Error(`Not a directory: ${absolute}`);
+    }
+    if (absolute !== resolvePath(this.workspaceRoot) && !this.extraDirs.includes(absolute)) {
+      this.extraDirs.push(absolute);
+    }
+    return absolute;
+  }
+
+  /** `/fork`: continue in a copy of this conversation; the original stays saved for /resume. */
+  fork(): string {
+    this.assertIdle();
+    const original = this.id;
+    this.id = generateSessionId();
+    this.createdAt = new Date().toISOString();
+    this.sessionTitle = this.sessionTitle ? `${this.sessionTitle} (fork)`.slice(0, 120) : undefined;
+    this.checkpoints = [];
+    this.persist();
+    this.emit('session_changed', { reason: 'fork', from: original });
+    return original;
+  }
+
+  /**
+   * `/btw`: a side question answered from the conversation so far, without
+   * tools and without adding it to the history.
+   */
+  async aside(question: string): Promise<string> {
+    const response = await this.client.create(
+      {
+        model: this.model,
+        max_tokens: MAX_OUTPUT_TOKENS,
+        system:
+          `${buildSystemPrompt(this.workspaceRoot)}\n\nThis is a quick side question from the user. ` +
+          'Answer it briefly from what you already know in this conversation; do not call tools.',
+        tools: this.tools(),
+        messages: withUserText(this.history, question),
+      },
+      this.client.viaAiolah
+        ? { ...(this.turnHeaders ?? { 'X-Aiolah-Session': this.id }), 'X-Aiolah-Purpose': 'btw' }
+        : undefined,
+    );
+    this.usage.requests += 1;
+    this.usage.inputTokens += response.usage?.input_tokens ?? 0;
+    this.usage.outputTokens += response.usage?.output_tokens ?? 0;
+    return response.content
+      .filter((block): block is Anthropic.TextBlock => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n')
+      .trim();
+  }
+
+  /** The turns /rewind can go back to, oldest first. */
+  listCheckpoints(): CheckpointInfo[] {
+    return this.checkpoints.map((checkpoint, index) => ({
+      index,
+      prompt: checkpoint.prompt,
+      at: checkpoint.at,
+      files: checkpoint.files.size,
+      conversation: checkpoint.historyLength >= 0,
+    }));
+  }
+
+  /**
+   * `/rewind`: back to before the prompt of checkpoint `index` — the files
+   * write_file / edit_file changed since then, the conversation, or both.
+   * Changes made by shell commands are not tracked.
+   */
+  rewind(index: number, what: 'both' | 'code' | 'conversation'): { files: number; prompt: string } {
+    this.assertIdle();
+    const target = this.checkpoints[index];
+    if (!target) {
+      throw new Error('No such checkpoint.');
+    }
+    if (what !== 'code' && target.historyLength < 0) {
+      throw new Error('The conversation was compacted after this point; only the code can be restored.');
+    }
+    let files = 0;
+    if (what !== 'conversation') {
+      for (const checkpoint of this.checkpoints.slice(index).reverse()) {
+        for (const [path, original] of checkpoint.files) {
+          if (original === null) {
+            rmSync(path, { force: true });
+          } else {
+            writeFileSync(path, original, 'utf8');
+          }
+          files += 1;
+        }
+        checkpoint.files.clear();
+      }
+    }
+    if (what !== 'code') {
+      this.history = this.history.slice(0, target.historyLength);
+      this.checkpoints = this.checkpoints.slice(0, index);
+      this.lastInputTokens = 0;
+      this.persist();
+    }
+    this.emit('rewound', { what, files });
+    return { files, prompt: target.prompt };
+  }
+
+  /** Remembers a file's content before write_file / edit_file changes it in this turn. */
+  private snapshotBeforeChange(input: Record<string, unknown>): void {
+    const checkpoint = this.checkpoints[this.checkpoints.length - 1];
+    if (!checkpoint || typeof input.path !== 'string') {
+      return;
+    }
+    let absolute: string;
+    try {
+      absolute = resolveInWorkspace([this.workspaceRoot, ...this.extraDirs], input.path);
+    } catch {
+      return;
+    }
+    if (!checkpoint.files.has(absolute)) {
+      checkpoint.files.set(absolute, existsSync(absolute) ? readFileSync(absolute, 'utf8') : null);
+    }
+  }
+
   /** `/clear`: a new, empty conversation (the old one stays saved for /resume). */
   startNew(): void {
     this.assertIdle();
@@ -220,6 +387,7 @@ export class ChatSession extends EventEmitter {
     this.createdAt = new Date().toISOString();
     this.history = [];
     this.sessionTitle = undefined;
+    this.checkpoints = [];
     this.lastInputTokens = 0;
     this.emit('session_changed', { reason: 'new' });
   }
@@ -232,6 +400,7 @@ export class ChatSession extends EventEmitter {
     this.createdAt = record.createdAt;
     this.history = record.history;
     this.sessionTitle = record.title;
+    this.checkpoints = [];
     this.lastInputTokens = 0;
     this.emit('session_changed', { reason: 'resume' });
   }
@@ -372,6 +541,12 @@ export class ChatSession extends EventEmitter {
       await this.compactHistory(false, undefined, signal, 'auto');
     }
 
+    this.checkpoints.push({
+      historyLength: this.history.length,
+      prompt: userMessage,
+      at: new Date(),
+      files: new Map(),
+    });
     this.history.push({
       role: 'user',
       content: images.length
@@ -403,7 +578,10 @@ export class ChatSession extends EventEmitter {
           {
             model: this.model,
             max_tokens: MAX_OUTPUT_TOKENS,
-            system: buildSystemPrompt(this.workspaceRoot, { planMode: this.currentMode() === 'plan' }),
+            system: buildSystemPrompt(this.workspaceRoot, {
+              planMode: this.currentMode() === 'plan',
+              extraDirs: this.extraDirs,
+            }),
             tools: this.tools(),
             messages: this.history,
           },
@@ -448,6 +626,9 @@ export class ChatSession extends EventEmitter {
           continue;
         }
         this.emit('tool', { name: block.name, input: block.input });
+        if (block.name === 'write_file' || block.name === 'edit_file') {
+          this.snapshotBeforeChange(block.input as Record<string, unknown>);
+        }
         let content: string;
         try {
           content = await executeTool(block.name, block.input as Record<string, unknown>, {
@@ -455,6 +636,7 @@ export class ChatSession extends EventEmitter {
             confirm: this.confirm,
             signal,
             mcp: this.mcp,
+            extraRoots: this.extraDirs,
           });
         } catch (error) {
           content = `Error: ${error instanceof Error ? error.message : String(error)}`;
@@ -473,7 +655,8 @@ export class ChatSession extends EventEmitter {
   }
 
   private tools(): Anthropic.Tool[] {
-    return this.mcp ? [...TOOL_SCHEMAS, ...this.mcp.toolSchemas] : TOOL_SCHEMAS;
+    const hasSkills = loadCustomCommands(this.workspaceRoot).some((command) => command.kind === 'skill');
+    return [...TOOL_SCHEMAS, ...(hasSkills ? [USE_SKILL_SCHEMA] : []), ...(this.mcp?.toolSchemas ?? [])];
   }
 
   /**
@@ -515,27 +698,16 @@ export class ChatSession extends EventEmitter {
           },
         ];
     this.lastInputTokens = 0;
+    for (const checkpoint of this.checkpoints) {
+      checkpoint.historyLength = -1;
+    }
     this.persist();
     this.emit('compact_end', { trigger, ok: true });
   }
 
   private async summarize(messages: MessageParam[], instructions?: string, signal?: AbortSignal): Promise<string> {
     const request = [COMPACT_INSTRUCTIONS, instructions ? `\nAlso: ${instructions}` : ''].join('');
-    const last = messages[messages.length - 1];
-    // End with one user message that asks for the summary (merged into trailing tool results).
-    const withRequest: MessageParam[] =
-      last?.role === 'user'
-        ? [
-            ...messages.slice(0, -1),
-            {
-              role: 'user',
-              content: [
-                ...(typeof last.content === 'string' ? [{ type: 'text' as const, text: last.content }] : last.content),
-                { type: 'text' as const, text: request },
-              ],
-            },
-          ]
-        : [...messages, { role: 'user', content: request }];
+    const withRequest = withUserText(messages, request);
     const response = await this.client.create(
       {
         model: this.model,

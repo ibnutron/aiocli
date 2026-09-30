@@ -80,6 +80,23 @@ default; set `AIOLAH_CONTEXT_WINDOW`), the next message compacts it first, and
 a request the model rejects as too long is compacted and retried once.
 `/status` shows the current size.
 
+**Custom commands and skills** (Claude Code's format, so existing ones work):
+a Markdown file in `.aiolah/commands/` or `.claude/commands/` (or
+`~/.aiolah/commands/` for every project) becomes `/<name>`, with `$ARGUMENTS`
+or `$1`…`$9` for what you type after it and optional frontmatter
+`description` / `argument-hint`; subfolders give `/folder:name`. A skill is
+`skills/<name>/SKILL.md` with `name` and `description` in its frontmatter: run
+it with `/<name>`, and the agent also loads it by itself (`use_skill`) when a
+task matches the description. Built in: `/review`, `/security-review` and
+`/simplify`.
+
+**Checkpoints.** Every prompt is a checkpoint. `/rewind` goes back to one:
+undo the file changes made since then (by `write_file` / `edit_file`, not by
+shell commands), the conversation, or both. `/fork` continues in a copy of the
+conversation, `/btw <question>` asks something on the side without adding it
+to the conversation, and `/add-dir <path>` (or `--add-dir`) lets the agent use
+another directory too.
+
 **Conversations.** `/clear` (also `/new`) starts a new, empty conversation;
 the previous one stays saved. `/resume` picks a saved conversation (this
 folder's first) and shows it again; `/resume <id>` or `aiolah -r <id>` opens
@@ -233,6 +250,13 @@ Inside `aiolah chat`, type `/` commands:
 | `/plan [task\|off]` | Plan mode: read-only until you approve a plan. |
 | `/permissions [allow\|deny\|remove <rule>]` | Show or change this folder's allow/deny rules. |
 | `/rename <title>` | Name the conversation (shown on /code and in `/resume`). |
+| `/btw <question>` | Ask a side question without adding it to the conversation. |
+| `/fork` | Continue in a copy of the conversation; the original stays in `/resume`. |
+| `/rewind` | Go back to an earlier prompt: undo file changes and/or the conversation. |
+| `/add-dir <path>` | Let the agent use another directory too (also `--add-dir`). |
+| `/review`, `/security-review`, `/simplify` | Built-in prompts for the pending changes. |
+| `/<your-command>` | Custom commands and skills from `.aiolah/commands`, `.aiolah/skills` (and `.claude/…`). |
+| `/release-notes` | What changed in each version. |
 | `/diff [full]` | What changed in the workspace (git status and diff). |
 | `/copy [N]` | Copy the assistant's last (or Nth-last) answer to the clipboard. |
 | `/export [file]` | Save the conversation as Markdown in the workspace. |
