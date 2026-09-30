@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type { ChatSession, PromptOrigin } from './session.js';
 import type { SessionSync } from './sessionSync.js';
 import type { StoredAuth } from './config.js';
-import type { ImageInput, WireMessage } from './protocol.js';
+import { TextBatcher, type ImageInput, type WireMessage } from './protocol.js';
 import {
   MAX_IMAGES,
   listModelOptions,
@@ -42,6 +42,7 @@ export class ChatRemote {
   private readonly peers = new Set<Peer>();
   private readonly questions = new Map<string, (allow: boolean) => void>();
   private relay: RelayConnection | null = null;
+  private readonly deltas = new TextBatcher((text) => this.broadcast({ type: 'assistant_delta', text }));
 
   constructor(
     private readonly session: ChatSession,
@@ -209,6 +210,9 @@ export class ChatRemote {
         this.broadcast({ type: 'user', text });
       }
     });
+    this.session.on('text', ({ text }: { text: string }) => {
+      if (this.peers.size) this.deltas.push(text);
+    });
     this.session.on('tool', ({ name, input }: { name: string; input: unknown }) => {
       this.broadcast({ type: 'tool', name, input });
     });
@@ -226,6 +230,8 @@ export class ChatRemote {
   }
 
   private broadcast(message: WireMessage, except?: Peer): void {
+    // Streamed text still waiting goes out before anything else about the turn.
+    if (message.type !== 'assistant_delta') this.deltas.flush();
     for (const peer of this.peers) {
       if (peer !== except) {
         peer.send(message);

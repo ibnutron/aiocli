@@ -13,6 +13,8 @@ export async function attachCommand(address: string): Promise<void> {
 
   const socket = new WebSocket(address);
   const pendingConfirms: string[] = [];
+  /** Whether this turn's answer is being printed as it is written (hosts on 0.1.4+). */
+  let streaming = false;
 
   await new Promise<void>((resolveOpen, reject) => {
     socket.once('open', resolveOpen);
@@ -44,11 +46,17 @@ export async function attachCommand(address: string): Promise<void> {
         case 'user':
           stdout.write(`\nother> ${message.text}\n`);
           return;
+        case 'assistant_delta':
+          stdout.write(`${streaming ? '' : '\nassistant> '}${message.text}`);
+          streaming = true;
+          return;
         case 'assistant':
-          stdout.write(`\nassistant> ${message.text}\n\n`);
+          stdout.write(streaming ? '\n\n' : `\nassistant> ${message.text}\n\n`);
+          streaming = false;
           return;
         case 'tool':
-          stdout.write(`\n[tool] ${message.name} ${JSON.stringify(message.input)}\n`);
+          stdout.write(`${streaming ? '\n' : ''}\n[tool] ${message.name} ${JSON.stringify(message.input)}\n`);
+          streaming = false;
           return;
         case 'tool_result':
           stdout.write(`[tool_result] ${message.name}: ${preview(message.result)}\n`);

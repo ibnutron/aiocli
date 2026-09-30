@@ -32,6 +32,11 @@ export type WireMessage =
   | { type: 'open_session'; session: string }
   /** Client → host: `images` (optional) are attached; host → clients: only `imageCount`. */
   | { type: 'user'; text: string; images?: ImageInput[]; imageCount?: number }
+  /**
+   * Host → clients (0.1.4+): the answer while it is written, in pieces, including
+   * text before tool calls. The complete reply still follows as `assistant`.
+   */
+  | { type: 'assistant_delta'; text: string }
   | { type: 'assistant'; text: string }
   /** Client → host: models the session's provider offers; answered with `models`. */
   | { type: 'list_models' }
@@ -61,6 +66,36 @@ export type RelayFrame =
   | { type: 'relay_client_joined'; clientId: string; session?: string }
   | { type: 'relay_client_left'; clientId: string }
   | { type: 'relay_msg'; from?: string; to?: string; msg: WireMessage };
+
+/**
+ * Collects streamed text for `assistant_delta` and sends it at most every
+ * `intervalMs`, so a fast model doesn't cost one WebSocket message per token.
+ * `flush()` sends what is pending right away; call it before any other
+ * message about the same turn so the order stays right.
+ */
+export class TextBatcher {
+  private pending = '';
+  private timer: NodeJS.Timeout | null = null;
+
+  constructor(
+    private readonly send: (text: string) => void,
+    private readonly intervalMs = 50,
+  ) {}
+
+  push(text: string): void {
+    this.pending += text;
+    this.timer ??= setTimeout(() => this.flush(), this.intervalMs);
+  }
+
+  flush(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    if (!this.pending) return;
+    const text = this.pending;
+    this.pending = '';
+    this.send(text);
+  }
+}
 
 /** Session selector accepted from clients: a local session id or `new`. */
 export const SESSION_SELECTOR = /^(new|[A-Za-z0-9._-]{1,64})$/;

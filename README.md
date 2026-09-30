@@ -646,6 +646,11 @@ JSON messages over one WebSocket:
      every client receives `{type:"model", provider, model}`.
    - `{type:"interrupt"}` stops the running turn (model call or shell command);
      clients receive `{type:"interrupted"}` and `{type:"idle"}`.
+6. Since 0.1.4 the host streams the answer: `{type:"assistant_delta", text}`
+   pieces (every ~50 ms while the model writes, also text before tool calls)
+   arrive before the `tool` messages and the final `{type:"assistant", text}`,
+   which still carries the complete reply. Clients that ignore
+   `assistant_delta` keep working.
 
 ## Development
 

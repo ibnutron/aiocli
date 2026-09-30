@@ -15,7 +15,7 @@ import { ensureTrusted } from '../trust.js';
 import { mcpSummary, startMcp } from '../mcp/index.js';
 import { ask } from '../prompt.js';
 import { resolveSelection } from '../providers.js';
-import { SESSION_SELECTOR, type ImageInput, type WireMessage } from '../protocol.js';
+import { SESSION_SELECTOR, TextBatcher, type ImageInput, type WireMessage } from '../protocol.js';
 import {
   MAX_IMAGES,
   listModelOptions,
@@ -47,6 +47,8 @@ interface SessionRuntime {
   peers: Set<Peer>;
   pendingConfirms: Map<string, (allow: boolean) => void>;
   busy: boolean;
+  /** The answer's text while it is written, sent to clients as `assistant_delta`. */
+  deltas: TextBatcher;
 }
 
 const MAX_AUTH_ATTEMPTS = 3;
@@ -125,8 +127,10 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
       peers,
       pendingConfirms,
       busy: false,
+      deltas: new TextBatcher((text) => broadcast(runtime, { type: 'assistant_delta', text })),
     };
 
+    session.on('text', ({ text }: { text: string }) => runtime.deltas.push(text));
     session.on('tool', ({ name, input }) => {
       stdout.write(`\n[tool ${session.sessionId}] ${name} ${JSON.stringify(input)}\n`);
       broadcast(runtime, { type: 'tool', name, input });
@@ -285,6 +289,8 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
   }
 
   function broadcast(runtime: SessionRuntime, message: WireMessage, except?: Peer): void {
+    // Streamed text still waiting goes out before anything else about the turn.
+    if (message.type !== 'assistant_delta') runtime.deltas.flush();
     for (const peer of runtime.peers) {
       if (peer !== except) {
         peer.send(message);
