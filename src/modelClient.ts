@@ -115,22 +115,62 @@ function createUnloggedClient(provider: string): ModelClient {
   return openAiClient(provider, baseURL, apiKey);
 }
 
+type CacheControl = { type: 'ephemeral' };
+const EPHEMERAL: CacheControl = { type: 'ephemeral' };
+
+/**
+ * Anthropic prompt caching: mark the end of the system prompt (tools come before it,
+ * so they are cached too) and the end of the latest message. Every turn of the agent
+ * loop re-sends the same prefix, so later requests read it from the cache at 10% of
+ * the input price. Works the same through the aiolah proxy (Claude models are
+ * forwarded as-is; other models drop `cache_control` in the server's translation).
+ * The history itself is not modified — markers are added to a copy per request.
+ */
+export function withPromptCaching(request: ModelRequest): Anthropic.MessageCreateParamsNonStreaming {
+  const system = request.system ? [{ type: 'text' as const, text: request.system, cache_control: EPHEMERAL }] : undefined;
+
+  const messages = request.messages.map((message, index) => {
+    if (index !== request.messages.length - 1) {
+      return message;
+    }
+    if (typeof message.content === 'string') {
+      return { ...message, content: [{ type: 'text' as const, text: message.content, cache_control: EPHEMERAL }] };
+    }
+    const blocks = [...message.content];
+    const last = blocks[blocks.length - 1] as { type: string } | undefined;
+    // Thinking blocks cannot carry cache_control.
+    if (last && last.type !== 'thinking' && last.type !== 'redacted_thinking') {
+      blocks[blocks.length - 1] = { ...last, cache_control: EPHEMERAL } as (typeof blocks)[number];
+    }
+    return { ...message, content: blocks };
+  });
+
+  return { ...request, ...(system ? { system } : {}), messages } as Anthropic.MessageCreateParamsNonStreaming;
+}
+
+/** Full prompt size: with caching, `input_tokens` only counts the uncached part. */
+function promptTokens(usage: { input_tokens?: number; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null }): number {
+  return (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
+}
+
 function anthropicClient(provider: string, client: Anthropic, viaAiolah: boolean): ModelClient {
   return {
     provider,
     viaAiolah,
     async create(request, headers, signal, onText) {
       const options = { ...(headers ? { headers } : {}), signal };
+      // The auto-mode permission check is a tiny one-off prompt (and the proxy only accepts a plain system string there).
+      const body = headers?.['X-Aiolah-Purpose'] === 'permission-check' ? request : withPromptCaching(request);
       try {
         if (!onText) {
-          const response = await client.messages.create(request, options);
+          const response = await client.messages.create(body, options);
           return {
             content: response.content,
             stop_reason: response.stop_reason,
-            usage: { input_tokens: response.usage.input_tokens, output_tokens: response.usage.output_tokens },
+            usage: { input_tokens: promptTokens(response.usage), output_tokens: response.usage.output_tokens },
           };
         }
-        const stream = client.messages.stream(request, options);
+        const stream = client.messages.stream(body, options);
         // The aiolah proxy can only report the prompt size at the end (in message_delta).
         let lateInputTokens = 0;
         // This SDK version drops thinking_delta/signature_delta when it assembles the message,
@@ -162,7 +202,7 @@ function anthropicClient(provider: string, client: Anthropic, viaAiolah: boolean
           content: response.content,
           stop_reason: response.stop_reason,
           usage: {
-            input_tokens: response.usage.input_tokens || lateInputTokens,
+            input_tokens: promptTokens(response.usage) || lateInputTokens,
             output_tokens: response.usage.output_tokens,
           },
         };

@@ -1,6 +1,12 @@
 /** What changed in each version, newest first (shown by /release-notes). */
 export const RELEASE_NOTES: { version: string; changes: string[] }[] = [
   {
+    version: '0.1.5',
+    changes: [
+      'Claude models use prompt caching: the system prompt, tools and conversation so far are read from cache on each turn (much cheaper input)',
+    ],
+  },
+  {
     version: '0.1.4',
     changes: [
       'Project instructions: AGENTS.md, AIOLAH.md, CLAUDE.md and ~/.aiolah/AGENTS.md; /init and /memory',
