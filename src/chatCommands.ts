@@ -107,6 +107,8 @@ export function workspaceDiff(workspaceRoot: string, full: boolean): string {
 interface MeWithQuota {
   plan?: { name: string; is_free: boolean };
   quota?: { remaining: number | null; resets_at: string | null; credits: number } | null;
+  /** Monthly credits (cost based) + top-up balance, sent by newer servers. */
+  credits?: { limit: number | null; used: number; remaining: number | null; unlimited: boolean; resets_at: string; top_up?: number } | null;
 }
 
 /** `/usage`: the aiolah plan and the chat quota left (model requests through aiolah use it). */
@@ -118,6 +120,15 @@ export async function planUsage(): Promise<string> {
   const me = await apiRequest<MeWithQuota>(auth.server, '/api/v1/app/cli/me', { token: auth.token });
   if (me.status !== 200 || !me.data.plan) {
     return `Could not load your plan from aiolah (HTTP ${me.status}).`;
+  }
+  const fmt = (value: number) => value.toLocaleString('en-US', { maximumFractionDigits: value < 10 ? 1 : 0 });
+  const monthly = me.data.credits;
+  if (monthly) {
+    const left = monthly.unlimited || monthly.remaining === null
+      ? `${fmt(monthly.used)} credits used this month (not limited)`
+      : `${fmt(monthly.remaining)} of ${fmt(monthly.limit ?? 0)} monthly credits left, resets ${new Date(monthly.resets_at).toLocaleDateString()}`;
+    const topUp = monthly.top_up ? ` · ${fmt(monthly.top_up)} top-up credits (never expire)` : '';
+    return `Plan ${me.data.plan.name} · ${left}${topUp}\nEach request costs credits by model (see aiolah models: $ cheap · $$ mid · $$$ expensive).`;
   }
   const quota = me.data.quota;
   const remaining =

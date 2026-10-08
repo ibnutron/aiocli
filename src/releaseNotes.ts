@@ -1,6 +1,13 @@
 /** What changed in each version, newest first (shown by /release-notes). */
 export const RELEASE_NOTES: { version: string; changes: string[] }[] = [
   {
+    version: '0.1.6',
+    changes: [
+      'aiolah models and /models show what each model costs: $ cheap · $$ mid · $$$ expensive, credits per message',
+      '/usage shows your monthly credits left and your top-up credits (they never expire)',
+    ],
+  },
+  {
     version: '0.1.5',
     changes: [
       'Claude models use prompt caching: the system prompt, tools and conversation so far are read from cache on each turn (much cheaper input)',

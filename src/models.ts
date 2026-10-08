@@ -8,6 +8,16 @@ export interface CliModel {
   developer: string | null;
   tier: string;
   featured: boolean;
+  /** Cost badge from aiolah (newer servers): credits per message and a cheap/mid/high level. */
+  cost?: { credits: number; unit: string; level: 'low' | 'mid' | 'high'; per_second: number | null } | null;
+}
+
+/** "$ 0.09 cr/msg" — the same cost signs as the aiolah web and app model pickers. */
+export function costLabel(cost: CliModel['cost']): string | undefined {
+  if (!cost) return undefined;
+  const signs = { low: '$', mid: '$$', high: '$$$' }[cost.level];
+  const credits = cost.credits.toLocaleString('en-US', { maximumFractionDigits: cost.credits < 1 ? 2 : 1 });
+  return `${signs} ${credits} cr/msg`;
 }
 
 /**

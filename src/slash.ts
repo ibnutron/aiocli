@@ -3,7 +3,7 @@ import type { ChatSession } from './session.js';
 import type { PickOptions, PickSection } from './terminalInput.js';
 import { listSessions } from './persistence.js';
 import { readAuth } from './config.js';
-import { fetchModels } from './models.js';
+import { costLabel, fetchModels } from './models.js';
 import {
   PROVIDERS,
   isConnected,
@@ -995,7 +995,9 @@ async function modelItems(
       models: data.map((model) => ({
         id: model.id,
         label: model.name || model.id,
-        hint: model.tier ? model.tier.charAt(0).toUpperCase() + model.tier.slice(1) : undefined,
+        hint: [costLabel(model.cost), model.tier ? model.tier.charAt(0).toUpperCase() + model.tier.slice(1) : undefined]
+          .filter(Boolean)
+          .join(' · ') || undefined,
       })),
     };
   }
